@@ -1,0 +1,22 @@
+[package]
+name = "usb_bus"
+description = "USB bus driver that produces the UsbIo protocol as a Patina component."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+log = { workspace = true }
+patina = { workspace = true, features = ["alloc", "unstable-device-path"] }
+r-efi = { workspace = true }
+scroll = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+patina = { workspace = true, features = ["mockall"] }

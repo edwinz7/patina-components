@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["placeholder"]
+members = ["usb_bus"]
 
 [workspace.package]
 version = "0.0.1"
@@ -11,7 +11,13 @@ description = "Patina components"
 repository = "https://github.com/OpenDevicePartnership/patina-components"
 
 [workspace.dependencies]
-patina = { version = "21"}
+patina = { git = "https://github.com/OpenDevicePartnership/patina", branch = "feature/uefi_services" }
+log = { version = "0.4", default-features = false }
+mockall = { version = "0.15.0" }
+num_enum = { version = "0.7", default-features = false }
+# git path is a temporary placeholder until the appropriate protocol branches are checked in upstream.
+r-efi = { version = "7", default-features = false }
+scroll = { version = "0.13", default-features = false, features = ["derive"] }
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"
