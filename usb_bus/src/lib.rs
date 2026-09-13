@@ -15,9 +15,11 @@
 extern crate alloc;
 
 pub(crate) mod driver;
+#[path = "../../protocols/usb_2_host_controller.rs"]
+pub(crate) mod usb_2_host_controller;
 pub(crate) mod usb_bus_defs;
-pub(crate) mod usb_enumer;
 pub(crate) mod usb_desc;
+pub(crate) mod usb_enumer;
 pub(crate) mod usb_hub;
 pub(crate) mod usb_io_impl;
 pub(crate) mod usb_utility;

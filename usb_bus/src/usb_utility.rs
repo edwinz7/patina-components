@@ -14,17 +14,14 @@ use core::{ffi::c_void, mem, ptr};
 #[path = "../../protocols/device_path.rs"]
 mod device_path;
 
-#[path = "../../protocols/usb_2_host_controller.rs"]
-mod usb_2_host_controller;
-
 use patina::uefi::boot_services::BootServices;
 use r_efi::{base::Boolean, efi};
 
-use crate::usb_bus_defs::{USB_INTERFACE_SIGNATURE, UsbBus, UsbInterface};
-use usb_2_host_controller::{
+use crate::usb_2_host_controller::{
     AsyncUsbTransferCallback, Protocol as Usb2HcProtocol, Usb2HcTransactionTranslator, UsbDataDirection,
     UsbDeviceRequest, UsbPortFeature,
 };
+use crate::usb_bus_defs::{USB_INTERFACE_SIGNATURE, UsbBus, UsbInterface};
 
 pub type Result<T = ()> = core::result::Result<T, efi::Status>;
 
@@ -46,7 +43,7 @@ pub unsafe fn usb_hc_get_capability(
 pub unsafe fn usb_hc_get_root_hub_port_status(
     bus: *mut UsbBus,
     port_index: u8,
-    port_status: *mut usb_2_host_controller::UsbPortStatus
+    port_status: *mut crate::usb_2_host_controller::UsbPortStatus,
 ) -> efi::Status {
     // SAFETY: The bus and host-controller pointers are owned by the active driver binding.
     unsafe { ((*host_controller(bus)).get_root_hub_port_status)(host_controller(bus), port_index, port_status) }
@@ -230,7 +227,7 @@ pub fn usb_close_host_proto_by_child<U: BootServices>(
 ) -> Result {
     // SAFETY: The bus pointer is valid for the lifetime of the binding.
     let host_handle = unsafe { (*bus).host_handle };
-    boot_services.close_protocol(host_handle, &usb_2_host_controller::PROTOCOL_GUID, agent, child)
+    boot_services.close_protocol(host_handle, &crate::usb_2_host_controller::PROTOCOL_GUID, agent, child)
 }
 
 /// Returns the current task priority level.

@@ -4,12 +4,8 @@
 
 use r_efi::efi;
 
+use crate::usb_2_host_controller::UsbPortFeature;
 use crate::usb_bus_defs::{UsbDevice, UsbInterface};
-
-#[path = "../../protocols/usb_2_host_controller.rs"]
-mod usb_2_host_controller;
-
-use usb_2_host_controller::UsbPortFeature;
 
 pub const USB_ENDPOINT_ADDR_MASK: u8 = 0x7f;
 pub const USB_ENDPOINT_TYPE_MASK: u8 = 0x03;

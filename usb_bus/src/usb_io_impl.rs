@@ -11,9 +11,8 @@
 
 use crate::efi::protocols::usb_io::{AsyncUsbTransferCallback, Protocol};
 use core::ffi::c_void;
-use r_efi::base::Boolean;
-use r_efi::efi;
-use r_efi::efi::protocols::usb_io;
+use patina::uefi::boot_services::tpl::Tpl;
+use r_efi::{base::Boolean, efi, efi::protocols::usb_io};
 
 /// Creates a new `UsbIoProtocol` populated with this module's function pointers.
 pub fn new_usb_io_protocol() -> Protocol {

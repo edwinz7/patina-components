@@ -6,20 +6,20 @@
 
 #![allow(dead_code)]
 
-#[path = "../../protocols/usb_2_host_controller.rs"]
-mod usb_2_host_controller;
-
-use core::ffi::c_void;
+use core::{ffi::c_void, mem, ptr};
 use patina::{BinaryGuid, pi::list_entry, protocol::ProtocolInterface, uefi::boot_services::tpl::Tpl};
 use r_efi::{
     base::Boolean,
     efi,
     efi::protocols::{device_path::Protocol as DevicePathProtocol, usb_io::Protocol as UsbIoProtocol},
 };
-use usb_2_host_controller::Protocol as Usb2HcProtocol;
 
+use crate::usb_2_host_controller::Protocol as Usb2HcProtocol;
 use crate::usb_desc::{UsbConfigDesc, UsbDeviceDesc, UsbEndpointDesc, UsbInterfaceDesc, UsbInterfaceSetting};
-use crate::usb_enumer::{UsbHubInit, UsbHubGetPortStatus, UsbHubClearPortChange, UsbHubSetPortFeature, UsbHubClearPortFeature, UsbHubResetPort, UsbHubRelease};
+use crate::usb_enumer::{
+    UsbHubClearPortChange, UsbHubClearPortFeature, UsbHubGetPortStatus, UsbHubInit, UsbHubRelease, UsbHubResetPort,
+    UsbHubSetPortFeature,
+};
 
 pub const USB_BUS_PROTOCOL_GUID: BinaryGuid = BinaryGuid::from_string("dceefc3d-ad07-4986-be64-f5ba2ed6591c");
 
@@ -283,4 +283,19 @@ pub struct DevicePathListItem {
 pub struct UsbClassFormatDevicePath {
     pub usb_class: [u8; 32],
     pub end: DevicePathProtocol,
+}
+
+pub unsafe fn usb_interface_from_usb_io(this: *mut r_efi::efi::protocols::usb_io::Protocol) -> *mut UsbInterface {
+    // "this" points to UsbInterface.usb_io
+    let base = unsafe { (this as *mut u8).sub(mem::offset_of!(UsbInterface, usb_io) as usize) };
+    let iface = base as *mut UsbInterface;
+
+    unsafe {
+        // Same safety check as the C macro
+        if (*iface).signature != USB_INTERFACE_SIGNATURE as usize {
+            return ptr::null_mut();
+        }
+    }
+
+    iface
 }

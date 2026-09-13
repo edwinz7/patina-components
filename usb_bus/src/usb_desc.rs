@@ -2,7 +2,18 @@
 
 #![allow(dead_code)]
 
-use r_efi::industry::usb::{ConfigDescriptor, DeviceDescriptor, EndpointDescriptor, InterfaceDescriptor};
+extern crate alloc;
+
+use alloc::{boxed::Box, vec, vec::Vec};
+use core::{ffi::c_void, mem, ptr, slice};
+use r_efi::{
+    efi::{Status, protocols::usb_io},
+    industry::usb::{ConfigDescriptor, DeviceDescriptor, EndpointDescriptor, InterfaceDescriptor},
+};
+
+use crate::usb_2_host_controller::{UsbDataDirection, UsbDeviceRequest};
+use crate::usb_bus_defs::{UsbDevice, USB_CLEAR_FEATURE_REQUEST_TIMEOUT, USB_GENERAL_DEVICE_REQUEST_TIMEOUT};
+use crate::usb_utility::usb_hc_control_transfer;
 
 /// Maximum number of alternate settings retained for one USB interface.
 pub const USB_MAX_INTERFACE_SETTING: usize = 256;
@@ -70,4 +81,503 @@ pub struct UsbConfigDesc {
 pub struct UsbDeviceDesc {
     pub descriptor: DeviceDescriptor,
     pub configs: *mut *mut UsbConfigDesc,
+}
+
+/// Frees an interface setting and all of its endpoint descriptors.
+pub unsafe fn usb_free_interface_desc(setting: Box<UsbInterfaceSetting>) {
+    let endpoint_count = setting.descriptor.num_endpoints as usize;
+    let endpoints = setting.endpoints;
+    drop(setting);
+
+    if !endpoints.is_null() {
+        let endpoint_slots = unsafe { Box::from_raw(slice::from_raw_parts_mut(endpoints, endpoint_count)) };
+        for endpoint in endpoint_slots.into_vec() {
+            if !endpoint.is_null() {
+                drop(unsafe { Box::from_raw(endpoint) });
+            }
+        }
+    }
+}
+
+/// Frees a configuration descriptor and its interface descriptors.
+pub unsafe fn usb_free_config_desc(config: Box<UsbConfigDesc>) {
+    let interface_count = config.descriptor.num_interfaces as usize;
+    let interfaces = config.interfaces;
+    drop(config);
+
+    if !interfaces.is_null() {
+        let interface_slots = unsafe { Box::from_raw(slice::from_raw_parts_mut(interfaces, interface_count)) };
+        for interface in interface_slots.into_vec() {
+            if interface.is_null() {
+                continue;
+            }
+
+            let interface = unsafe { Box::from_raw(interface) };
+            for setting_index in 0..interface.num_of_setting {
+                let setting = interface.settings[setting_index];
+                if !setting.is_null() {
+                    unsafe { usb_free_interface_desc(Box::from_raw(setting)) };
+                }
+            }
+        }
+    }
+}
+
+/// Frees a device descriptor and all parsed configurations.
+pub unsafe fn usb_free_dev_desc(descriptor: Box<UsbDeviceDesc>) {
+    let config_count = descriptor.descriptor.num_configurations as usize;
+    let configs = descriptor.configs;
+    drop(descriptor);
+
+    if !configs.is_null() {
+        let config_slots = unsafe { Box::from_raw(slice::from_raw_parts_mut(configs, config_count)) };
+        for config in config_slots.into_vec() {
+            if !config.is_null() {
+                unsafe { usb_free_config_desc(Box::from_raw(config)) };
+            }
+        }
+    }
+}
+
+/// Returns the first descriptor of `descriptor_type` and the bytes consumed.
+pub fn usb_create_desc(descriptor_bytes: &[u8], descriptor_type: u8) -> Option<(Vec<u8>, usize)> {
+    let required_size = match descriptor_type {
+        USB_DESC_TYPE_DEVICE => mem::size_of::<DeviceDescriptor>(),
+        USB_DESC_TYPE_CONFIG => mem::size_of::<ConfigDescriptor>(),
+        USB_DESC_TYPE_INTERFACE => mem::size_of::<InterfaceDescriptor>(),
+        USB_DESC_TYPE_ENDPOINT => mem::size_of::<EndpointDescriptor>(),
+        _ => return None,
+    };
+
+    if descriptor_bytes.len() < mem::size_of::<DescriptorHeader>() {
+        return None;
+    }
+
+    let mut offset = 0;
+    while offset + mem::size_of::<DescriptorHeader>() <= descriptor_bytes.len() {
+        let length = descriptor_bytes[offset] as usize;
+        if length == 0 || offset.checked_add(length)? > descriptor_bytes.len() {
+            return None;
+        }
+
+        if descriptor_bytes[offset + 1] == descriptor_type {
+            if length < required_size {
+                return None;
+            }
+            return Some((descriptor_bytes[offset..offset + required_size].to_vec(), offset + length));
+        }
+
+        offset += length;
+    }
+
+    None
+}
+
+fn read_descriptor<T: Copy>(bytes: &[u8]) -> Option<T> {
+    if bytes.len() < mem::size_of::<T>() {
+        return None;
+    }
+
+    Some(unsafe { ptr::read_unaligned(bytes.as_ptr().cast::<T>()) })
+}
+
+/// Parses an interface descriptor and its endpoint descriptors.
+pub fn usb_parse_interface_desc(bytes: &[u8]) -> Option<(Box<UsbInterfaceSetting>, usize)> {
+    let (interface_bytes, consumed) = usb_create_desc(bytes, USB_DESC_TYPE_INTERFACE)?;
+    let descriptor = read_descriptor::<InterfaceDescriptor>(&interface_bytes)?;
+    let endpoint_count = descriptor.num_endpoints as usize;
+    let mut endpoints = Vec::with_capacity(endpoint_count);
+    let mut offset = consumed;
+
+    for _ in 0..endpoint_count {
+        if offset >= bytes.len() {
+            return None;
+        }
+        let (endpoint_bytes, endpoint_consumed) = usb_create_desc(&bytes[offset..], USB_DESC_TYPE_ENDPOINT)?;
+        let endpoint_descriptor = read_descriptor::<EndpointDescriptor>(&endpoint_bytes)?;
+        endpoints.push(Box::into_raw(Box::new(UsbEndpointDesc { descriptor: endpoint_descriptor, toggle: 0 })));
+        offset += endpoint_consumed;
+    }
+
+    let endpoint_pointer = if endpoints.is_empty() {
+        ptr::null_mut()
+    } else {
+        Box::into_raw(endpoints.into_boxed_slice()).cast::<*mut UsbEndpointDesc>()
+    };
+
+    Some((Box::new(UsbInterfaceSetting { descriptor, endpoints: endpoint_pointer }), offset))
+}
+
+/// Parses a configuration descriptor and all interface alternate settings.
+pub fn usb_parse_config_desc(bytes: &[u8]) -> Option<Box<UsbConfigDesc>> {
+    let (config_bytes, header_consumed) = usb_create_desc(bytes, USB_DESC_TYPE_CONFIG)?;
+    let descriptor = read_descriptor::<ConfigDescriptor>(&config_bytes)?;
+    let interface_count = descriptor.num_interfaces as usize;
+    let mut interfaces = vec![ptr::null_mut(); interface_count];
+
+    for slot in &mut interfaces {
+        *slot = Box::into_raw(Box::new(UsbInterfaceDesc {
+            settings: [ptr::null_mut(); USB_MAX_INTERFACE_SETTING],
+            num_of_setting: 0,
+            active_index: 0,
+        }));
+    }
+
+    let total_length = descriptor.total_length as usize;
+    let parse_length = total_length.min(bytes.len());
+    let mut offset = header_consumed;
+
+    while offset + mem::size_of::<InterfaceDescriptor>() <= parse_length {
+        let (setting, consumed) = match usb_parse_interface_desc(&bytes[offset..parse_length]) {
+            Some(value) => value,
+            None => break,
+        };
+        let interface_number = setting.descriptor.interface_number as usize;
+        if interface_number >= interface_count {
+            unsafe { usb_free_interface_desc(setting) };
+            unsafe {
+                usb_free_config_desc(Box::new(UsbConfigDesc {
+                    descriptor,
+                    interfaces: Box::into_raw(interfaces.into_boxed_slice()).cast(),
+                }))
+            };
+            return None;
+        }
+
+        let interface = unsafe { &mut *interfaces[interface_number] };
+        if interface.num_of_setting >= USB_MAX_INTERFACE_SETTING {
+            unsafe { usb_free_interface_desc(setting) };
+            unsafe {
+                usb_free_config_desc(Box::new(UsbConfigDesc {
+                    descriptor,
+                    interfaces: Box::into_raw(interfaces.into_boxed_slice()).cast(),
+                }))
+            };
+            return None;
+        }
+        interface.settings[interface.num_of_setting] = Box::into_raw(setting);
+        interface.num_of_setting += 1;
+        offset += consumed;
+    }
+
+    Some(Box::new(UsbConfigDesc { descriptor, interfaces: Box::into_raw(interfaces.into_boxed_slice()).cast() }))
+}
+
+/// Executes a USB control request for a device.
+pub unsafe fn usb_ctrl_request(
+    usb_dev: &mut UsbDevice,
+    direction: UsbDataDirection,
+    request_type: usize,
+    target: usize,
+    request: usize,
+    value: u16,
+    index: u16,
+    buffer: *mut c_void,
+    length: usize,
+) -> Status {
+    let bus = usb_dev.bus;
+    if bus.is_null() {
+        return Status::INVALID_PARAMETER;
+    }
+
+    let mut device_request = UsbDeviceRequest {
+        request_type: usb_request_type(matches!(direction, UsbDataDirection::In), request_type, target),
+        request: request as u8,
+        value,
+        index,
+        length: length as u16,
+    };
+    let mut transfer_length = length;
+    let mut usb_result = 0;
+
+    unsafe {
+        usb_hc_control_transfer(
+            bus,
+            usb_dev.address,
+            usb_dev.speed,
+            usb_dev.max_packet0 as usize,
+            &mut device_request,
+            direction,
+            buffer,
+            &mut transfer_length,
+            USB_GENERAL_DEVICE_REQUEST_TIMEOUT as usize,
+            usb_dev.translator.cast(),
+            &mut usb_result,
+        )
+    }
+}
+
+/// Retrieves a standard USB descriptor into the caller-provided buffer.
+pub unsafe fn usb_ctrl_get_desc(
+    usb_dev: &mut UsbDevice,
+    descriptor_type: usize,
+    descriptor_index: usize,
+    language_id: u16,
+    buffer: *mut c_void,
+    length: usize,
+) -> Status {
+    unsafe {
+        usb_ctrl_request(
+            usb_dev,
+            UsbDataDirection::In,
+            USB_REQ_TYPE_STANDARD,
+            USB_TARGET_DEVICE,
+            USB_REQ_GET_DESCRIPTOR,
+            ((descriptor_type << 8) | descriptor_index) as u16,
+            language_id,
+            buffer,
+            length,
+        )
+    }
+}
+
+/// Retrieves and stores the device's endpoint-zero packet size.
+pub unsafe fn usb_get_max_packet_size0(usb_dev: &mut UsbDevice) -> Status {
+    let mut descriptor: DeviceDescriptor = unsafe { mem::zeroed() };
+
+    for _ in 0..3 {
+        let status = unsafe {
+            usb_ctrl_get_desc(
+                usb_dev,
+                USB_DESC_TYPE_DEVICE as usize,
+                0,
+                0,
+                (&mut descriptor as *mut DeviceDescriptor).cast(),
+                8,
+            )
+        };
+        if status == Status::SUCCESS {
+            usb_dev.max_packet0 = if descriptor.bcd_usb >= 0x0300 && descriptor.max_packet_size0 == 9 {
+                1 << 9
+            } else {
+                descriptor.max_packet_size0 as u32
+            };
+            return status;
+        }
+    }
+
+    Status::DEVICE_ERROR
+}
+
+/// Retrieves and stores the device descriptor.
+pub unsafe fn usb_get_dev_desc(usb_dev: &mut UsbDevice) -> Status {
+    let mut descriptor = Box::new(UsbDeviceDesc { descriptor: unsafe { mem::zeroed() }, configs: ptr::null_mut() });
+    let status = unsafe {
+        usb_ctrl_get_desc(
+            usb_dev,
+            USB_DESC_TYPE_DEVICE as usize,
+            0,
+            0,
+            (&mut descriptor.descriptor as *mut DeviceDescriptor).cast(),
+            mem::size_of::<DeviceDescriptor>(),
+        )
+    };
+
+    if status == Status::SUCCESS {
+        usb_dev.dev_desc = Box::into_raw(descriptor);
+    }
+    status
+}
+
+/// Retrieves a string descriptor as UTF-16 code units.
+pub unsafe fn usb_get_one_string(usb_dev: &mut UsbDevice, index: u8, language_id: u16) -> Option<Vec<u16>> {
+    let mut header = [0u8; 2];
+    let status = unsafe {
+        usb_ctrl_get_desc(
+            usb_dev,
+            USB_DESC_TYPE_STRING as usize,
+            index as usize,
+            language_id,
+            header.as_mut_ptr().cast(),
+            header.len(),
+        )
+    };
+    let length = u16::from_le_bytes(header) as usize;
+    if status != Status::SUCCESS || length < 2 || length % 2 != 0 {
+        return None;
+    }
+
+    let mut bytes = vec![0u8; length];
+    let status = unsafe {
+        usb_ctrl_get_desc(
+            usb_dev,
+            USB_DESC_TYPE_STRING as usize,
+            index as usize,
+            language_id,
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+        )
+    };
+    if status != Status::SUCCESS {
+        return None;
+    }
+
+    Some(bytes[2..].chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect())
+}
+
+/// Builds the device's supported language-ID table.
+pub unsafe fn usb_build_lang_table(usb_dev: &mut UsbDevice) -> Status {
+    let Some(language_ids) = (unsafe { usb_get_one_string(usb_dev, 0, 0) }) else {
+        return Status::UNSUPPORTED;
+    };
+    if language_ids.is_empty() {
+        return Status::UNSUPPORTED;
+    }
+
+    let count = language_ids.len().min(usb_dev.lang_id.len());
+    usb_dev.lang_id[..count].copy_from_slice(&language_ids[..count]);
+    usb_dev.total_lang_id = count as u16;
+    Status::SUCCESS
+}
+
+/// Retrieves a complete configuration descriptor buffer.
+pub unsafe fn usb_get_one_config(usb_dev: &mut UsbDevice, index: u8) -> Option<Vec<u8>> {
+    let mut descriptor: ConfigDescriptor = unsafe { mem::zeroed() };
+    let status = unsafe {
+        usb_ctrl_get_desc(
+            usb_dev,
+            USB_DESC_TYPE_CONFIG as usize,
+            index as usize,
+            0,
+            (&mut descriptor as *mut ConfigDescriptor).cast(),
+            8,
+        )
+    };
+    let total_length = descriptor.total_length as usize;
+    if status != Status::SUCCESS || total_length < mem::size_of::<ConfigDescriptor>() {
+        return None;
+    }
+
+    let mut buffer = vec![0u8; total_length];
+    let status = unsafe {
+        usb_ctrl_get_desc(
+            usb_dev,
+            USB_DESC_TYPE_CONFIG as usize,
+            index as usize,
+            0,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    (status == Status::SUCCESS).then_some(buffer)
+}
+
+/// Retrieves and parses all descriptors belonging to a device.
+pub unsafe fn usb_build_desc_table(usb_dev: &mut UsbDevice) -> Status {
+    let status = unsafe { usb_get_dev_desc(usb_dev) };
+    if status != Status::SUCCESS {
+        return status;
+    }
+
+    let descriptor = unsafe { &mut *usb_dev.dev_desc };
+    let configuration_count = descriptor.descriptor.num_configurations as usize;
+    if configuration_count == 0 {
+        return Status::DEVICE_ERROR;
+    }
+
+    let mut configurations = vec![ptr::null_mut(); configuration_count];
+    for (index, slot) in configurations.iter_mut().enumerate() {
+        let Some(buffer) = (unsafe { usb_get_one_config(usb_dev, index as u8) }) else {
+            if index == 0 {
+                return Status::DEVICE_ERROR;
+            }
+            break;
+        };
+        let Some(config) = usb_parse_config_desc(&buffer) else {
+            if index == 0 {
+                return Status::DEVICE_ERROR;
+            }
+            break;
+        };
+        *slot = Box::into_raw(config);
+    }
+    descriptor.configs = Box::into_raw(configurations.into_boxed_slice()).cast();
+
+    let _ = unsafe { usb_build_lang_table(usb_dev) };
+    Status::SUCCESS
+}
+
+/// Sets the device address through a standard control request.
+pub unsafe fn usb_set_address(usb_dev: &mut UsbDevice, address: u8) -> Status {
+    unsafe {
+        usb_ctrl_request(
+            usb_dev,
+            UsbDataDirection::NoData,
+            USB_REQ_TYPE_STANDARD,
+            USB_TARGET_DEVICE,
+            USB_REQ_SET_ADDRESS,
+            address as u16,
+            0,
+            ptr::null_mut(),
+            0,
+        )
+    }
+}
+
+/// Sets the device configuration through a standard control request.
+pub unsafe fn usb_set_config(usb_dev: &mut UsbDevice, configuration: u8) -> Status {
+    unsafe {
+        usb_ctrl_request(
+            usb_dev,
+            UsbDataDirection::NoData,
+            USB_REQ_TYPE_STANDARD,
+            USB_TARGET_DEVICE,
+            USB_REQ_SET_CONFIG,
+            configuration as u16,
+            0,
+            ptr::null_mut(),
+            0,
+        )
+    }
+}
+
+/// Clears a USB feature through the USB IO protocol.
+pub unsafe fn usb_io_clear_feature(
+    usb_io: &mut usb_io::Protocol,
+    target: usize,
+    feature: u16,
+    index: u16,
+) -> Status {
+    let mut request = usb_io::DeviceRequest {
+        request_type: usb_request_type(false, USB_REQ_TYPE_STANDARD, target),
+        request: USB_REQ_CLEAR_FEATURE as u8,
+        value: feature,
+        index,
+        length: 0,
+    };
+    let mut usb_result = 0;
+
+    unsafe {
+        (usb_io.control_transfer)(
+            usb_io,
+            &mut request,
+            usb_io::NO_DATA,
+            USB_CLEAR_FEATURE_REQUEST_TIMEOUT,
+            ptr::null_mut(),
+            0,
+            &mut usb_result,
+        )
+    }
+}
+
+/// Refreshes the device and configuration descriptors from the device.
+pub unsafe fn usb_update_descriptors(usb_dev: &mut UsbDevice) {
+    let mut descriptor: DeviceDescriptor = unsafe { mem::zeroed() };
+    let status = unsafe {
+        usb_ctrl_get_desc(
+            usb_dev,
+            USB_DESC_TYPE_DEVICE as usize,
+            0,
+            0,
+            (&mut descriptor as *mut DeviceDescriptor).cast(),
+            mem::size_of::<DeviceDescriptor>(),
+        )
+    };
+    if status != Status::SUCCESS {
+        return;
+    }
+
+    for index in 0..descriptor.num_configurations {
+        let _ = unsafe { usb_get_one_config(usb_dev, index) };
+    }
 }

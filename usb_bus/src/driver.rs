@@ -14,9 +14,6 @@
 #[path = "../../protocols/device_path.rs"]
 mod device_path;
 
-#[path = "../../protocols/usb_2_host_controller.rs"]
-mod usb_2_host_controller;
-
 use alloc::boxed::Box;
 //use core::{ffi::c_void, ptr{self, NonNull}};
 use core::{
@@ -26,8 +23,8 @@ use core::{
 
 //use device_path::EfiDevPathPtr;
 //use r_efi::{efi, efi::protocols::usb_io, protocols::device_path::Protocol as EfiDevicePathProtocol};
+use crate::usb_2_host_controller::{self, Protocol as Usb2HcProtocol};
 use r_efi::{efi, protocols::device_path::Protocol as EfiDevicePathProtocol};
-use usb_2_host_controller::Protocol as Usb2HcProtocol;
 
 use patina::{
     pi::{
