@@ -19,6 +19,7 @@ use r_efi::{
 use usb_2_host_controller::Protocol as Usb2HcProtocol;
 
 use crate::usb_desc::{UsbConfigDesc, UsbDeviceDesc, UsbEndpointDesc, UsbInterfaceDesc, UsbInterfaceSetting};
+use crate::usb_enumer::{UsbHubInit, UsbHubGetPortStatus, UsbHubClearPortChange, UsbHubSetPortFeature, UsbHubClearPortFeature, UsbHubResetPort, UsbHubRelease};
 
 pub const USB_BUS_PROTOCOL_GUID: BinaryGuid = BinaryGuid::from_string("dceefc3d-ad07-4986-be64-f5ba2ed6591c");
 
@@ -121,12 +122,8 @@ pub const USB_CLEAR_FEATURE_REQUEST_TIMEOUT: u32 = 10;
 //
 pub const USB_BUS_TPL: Tpl = Tpl::NOTIFY;
 
-pub const USB_US_LAND_ID: u16 = 0x0409;
-
 pub const USB_INTERFACE_SIGNATURE: u64 = signature(b"USBI");
 pub const USB_BUS_SIGNATURE: u64 = signature(b"USBB");
-
-pub const DEVICE_PATH_LIST_ITEM_SIGNATURE: u64 = signature(b"dpli");
 
 const fn signature(bytes: &[u8; 4]) -> u64 {
     u32::from_le_bytes(*bytes) as u64
@@ -139,9 +136,6 @@ pub const fn usb_bit(bit: u32) -> usize {
 pub const fn usb_bit_is_set(data: usize, bit: usize) -> bool {
     data & bit == bit
 }
-
-/// Descriptor types implemented by the descriptor parser.
-pub enum UsbHubApi {}
 
 //
 // Used to locate USB_BUS
@@ -165,16 +159,25 @@ unsafe impl ProtocolInterface for EfiUsbBusProtocol {
 #[repr(C)]
 pub struct UsbDevice {
     pub bus: *mut UsbBus,
+
+    // Configuration information
     pub speed: u8,
     pub address: u8,
     pub max_packet0: u32,
+
+    // The device's descriptors and its configuration
     pub dev_desc: *mut UsbDeviceDesc,
     pub active_config: *mut UsbConfigDesc,
+
     pub lang_id: [u16; USB_MAX_LANG_ID],
     pub total_lang_id: u16,
+
     pub num_of_interface: u8,
     pub interfaces: [*mut UsbInterface; USB_MAX_INTERFACE],
+
+    // Parent child relationship
     pub translator: *mut c_void,
+
     pub parent_addr: u8,
     pub parent_if: *mut UsbInterface,
     pub parent_port: u8,
@@ -183,37 +186,91 @@ pub struct UsbDevice {
     pub disconnect_fail: Boolean,
 }
 
+//
+// Stands for different functions of USB device
+//
 #[repr(C)]
 pub struct UsbInterface {
     pub signature: usize,
     pub device: *mut UsbDevice,
     pub if_desc: *mut UsbInterfaceDesc,
     pub if_setting: *mut UsbInterfaceSetting,
+
+    // Handles and protocols
     pub handle: efi::Handle,
     pub usb_io: UsbIoProtocol,
     pub device_path: *mut DevicePathProtocol,
     pub is_managed: Boolean,
+
+    // Hub device special data
     pub is_hub: Boolean,
     pub hub_api: *mut UsbHubApi,
     pub num_of_port: u8,
     pub hub_notify: efi::Event,
+
+    // Data used only by normal hub devices
     pub hub_ep: *mut UsbEndpointDesc,
     pub change_map: *mut u8,
+
+    // Data used only by root hub to hand over device to
+    // companion UHCI driver if low/full speed devices are
+    // connected to EHCI.
     pub max_speed: u8,
+
+    // MU_CHANGE [BEGIN] - 168923
+    // Track the the number of enumeration attempts
     pub poll_count: u8,
+    // MU_CHANGE [END] - 168923
 }
 
+//
+// Stands for the current USB Bus
+//
 #[repr(C)]
 pub struct UsbBus {
     pub signature: usize,
     pub bus_id: EfiUsbBusProtocol,
+
+    // Managed USB host controller
     pub host_handle: efi::Handle,
     pub device_path: *mut DevicePathProtocol,
     pub usb2_hc: *mut Usb2HcProtocol,
+
+    // Recorded the max supported usb devices.
+    // XHCI can support up to 255 devices.
+    // EHCI/UHCI/OHCI supports up to 127 devices.
     pub max_devices: u32,
+
+    // An array of device that is on the bus. Devices[0] is
+    // for root hub. Device with address i is at Devices[i].
     pub devices: [*mut UsbDevice; 256],
+
+    // USB Bus driver need to control the recursive connect policy of the bus, only those wanted
+    // usb child device will be recursively connected.
+    //
+    // WantedUsbIoDPList tracks the Usb child devices which user want to recursively fully connecte,
+    // every wanted child device is stored in a item of the WantedUsbIoDPList, whose structure is
+    // DEVICE_PATH_LIST_ITEM
     pub wanted_usb_io_dp_list: list_entry::Entry,
 }
+
+//
+// USB Hub Api
+//
+#[repr(C)]
+pub struct UsbHubApi {
+    pub init: UsbHubInit,
+    pub get_port_status: UsbHubGetPortStatus,
+    pub clear_port_change: UsbHubClearPortChange,
+    pub set_port_feature: UsbHubSetPortFeature,
+    pub clear_port_feature: UsbHubClearPortFeature,
+    pub reset_port: UsbHubResetPort,
+    pub release: UsbHubRelease,
+}
+
+pub const USB_US_LAND_ID: u16 = 0x0409;
+
+pub const DEVICE_PATH_LIST_ITEM_SIGNATURE: u64 = signature(b"dpli");
 
 #[repr(C)]
 pub struct DevicePathListItem {

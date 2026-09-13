@@ -33,6 +33,35 @@ fn host_controller(bus: *mut UsbBus) -> *mut Usb2HcProtocol {
     unsafe { (*bus).usb2_hc.cast() }
 }
 
+pub unsafe fn usb_hc_get_capability(
+    bus: *mut UsbBus,
+    max_speed: *mut u8,
+    num_ports: *mut u8,
+    is_64_bit_capable: *mut u8,
+) -> efi::Status {
+    // SAFETY: The bus and host-controller pointers are owned by the active driver binding.
+    unsafe { ((*host_controller(bus)).get_capability)(host_controller(bus), max_speed, num_ports, is_64_bit_capable) }
+}
+
+pub unsafe fn usb_hc_get_root_hub_port_status(
+    bus: *mut UsbBus,
+    port_index: u8,
+    port_status: *mut usb_2_host_controller::UsbPortStatus
+) -> efi::Status {
+    // SAFETY: The bus and host-controller pointers are owned by the active driver binding.
+    unsafe { ((*host_controller(bus)).get_root_hub_port_status)(host_controller(bus), port_index, port_status) }
+}
+
+/// Sets a root-hub port feature through the USB2 host-controller protocol.
+pub unsafe fn usb_hc_set_root_hub_port_feature(
+    bus: *mut UsbBus,
+    port_index: u8,
+    feature: UsbPortFeature,
+) -> efi::Status {
+    // SAFETY: The bus and host-controller pointers are owned by the active driver binding.
+    unsafe { ((*host_controller(bus)).set_root_hub_port_feature)(host_controller(bus), port_index, feature) }
+}
+
 /// Clears a root-hub port feature through the USB2 host-controller protocol.
 pub unsafe fn usb_hc_clear_root_hub_port_feature(
     bus: *mut UsbBus,

@@ -16,6 +16,7 @@ extern crate alloc;
 
 pub(crate) mod driver;
 pub(crate) mod usb_bus_defs;
+pub(crate) mod usb_enumer;
 pub(crate) mod usb_desc;
 pub(crate) mod usb_hub;
 pub(crate) mod usb_io_impl;
