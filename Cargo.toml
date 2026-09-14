@@ -11,7 +11,7 @@ description = "Patina components"
 repository = "https://github.com/OpenDevicePartnership/patina-components"
 
 [workspace.dependencies]
-patina = { version = "23.2.0"  }
+patina = { git = "https://github.com/OpenDevicePartnership/patina", branch = "feature/uefi_services" }
 log = { version = "0.4", default-features = false }
 mockall = { version = "0.13.0" }
 num_enum = { version = "0.7", default-features = false }
