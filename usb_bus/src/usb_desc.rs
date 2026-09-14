@@ -559,7 +559,7 @@ pub unsafe fn usb_io_clear_feature(
         )
     }
 }
-
+/// MU_CHANGE [BEGIN] - 291137
 /// Refreshes the device and configuration descriptors from the device.
 pub unsafe fn usb_update_descriptors(usb_dev: &mut UsbDevice) {
     let mut descriptor: DeviceDescriptor = unsafe { mem::zeroed() };
@@ -581,3 +581,4 @@ pub unsafe fn usb_update_descriptors(usb_dev: &mut UsbDevice) {
         let _ = unsafe { usb_get_one_config(usb_dev, index) };
     }
 }
+// MU_CHANGE [END]
