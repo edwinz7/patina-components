@@ -15,12 +15,15 @@ use crate::usb_2_host_controller::{
     UsbDataDirection, UsbPortFeature, UsbPortStatus,
     USB_PORT_STAT_C_CONNECTION, USB_PORT_STAT_C_ENABLE,
     USB_PORT_STAT_C_OVERCURRENT, USB_PORT_STAT_C_RESET,
-    USB_PORT_STAT_C_SUSPEND, USB_PORT_STAT_RESET,
-    EFI_USB_SPEED_SUPER,
+    USB_PORT_STAT_C_SUSPEND, USB_PORT_STAT_ENABLE, USB_PORT_STAT_RESET,
+    EFI_USB_SPEED_HIGH, EFI_USB_SPEED_SUPER,
 };
 use crate::usb_bus_defs::{
     UsbDevice, UsbInterface,
-    USB_SET_PORT_RECOVERY_STALL, USB_WAIT_PORT_STS_CHANGE_STALL,
+    USB_ENUM_POLL_MINIMUM_ATTEMPTS, USB_SET_PORT_RECOVERY_STALL,
+    USB_SET_PORT_RESET_STALL, USB_SET_ROOT_PORT_ENABLE_STALL,
+    USB_SET_ROOT_PORT_RESET_STALL, USB_CLR_ROOT_PORT_RESET_STALL,
+    USB_SET_PORT_POWER_STALL, USB_WAIT_PORT_STS_CHANGE_STALL,
     USB_HUB_POLL_INTERVAL, USB_ROOTHUB_POLL_INTERVAL,
 };
 use crate::usb_desc::{usb_ctrl_request, usb_io_clear_feature};
@@ -172,13 +175,8 @@ pub unsafe fn usb_hub_ctrl_get_port_status(hub: &mut UsbDevice, port: u8, state:
 }
 
 /// Sets a feature on a hub port. The USB hub port number is one-based.
-pub unsafe fn usb_hub_ctrl_set_port_feature(hub: &mut UsbDevice, port: u8, feature: UsbPortFeature) -> efi::Status {
+pub unsafe fn usb_hub_ctrl_set_port_feature(hub: &mut UsbDevice, port: u8, feature: u16) -> efi::Status {
     unsafe { usb_ctrl_request(hub, UsbDataDirection::NoData, USB_REQ_TYPE_CLASS, USB_HUB_TARGET_PORT, USB_HUB_REQ_SET_FEATURE as usize, feature as u16, port as u16 + 1, core::ptr::null_mut(), 0) }
-}
-
-/// Clears a feature on a hub port. The USB hub port number is one-based.
-pub unsafe fn usb_hub_ctrl_clear_port_feature_enum(hub: &mut UsbDevice, port: u8, feature: UsbPortFeature) -> efi::Status {
-    unsafe { usb_hub_ctrl_clear_port_feature(hub, port, feature as u16) }
 }
 
 /// Reads the complete hub descriptor after obtaining its variable length.
@@ -218,299 +216,7 @@ pub unsafe fn usb_is_hub_interface(interface: &UsbInterface) -> bool {
         && setting.descriptor.interface_sub_class == USB_HUB_SUBCLASS_CODE
 }
 
-/// Retrieves and acknowledges a normal hub port status.
-pub unsafe fn usb_hub_get_port_status(
-    interface: &mut UsbInterface,
-    port: u8,
-    status: &mut UsbPortStatus,
-) -> efi::Status {
-    let Some(device) = (unsafe { interface.device.as_mut() }) else {
-        return efi::Status::INVALID_PARAMETER;
-    };
-    unsafe { usb_hub_ctrl_get_port_status(device, port, status) }
-}
-
-/// Clears all reported change bits on a normal hub port.
-pub unsafe fn usb_hub_clear_port_change(interface: &mut UsbInterface, port: u8) {
-    let mut status = UsbPortStatus { port_status: 0, port_change_status: 0 };
-    if unsafe { usb_hub_get_port_status(interface, port, &mut status) } != efi::Status::SUCCESS {
-        return;
-    }
-    for (changed_bit, feature) in [
-        (USB_PORT_STAT_C_CONNECTION, UsbPortFeature::ConnectChange),
-        (USB_PORT_STAT_C_ENABLE, UsbPortFeature::EnableChange),
-        (USB_PORT_STAT_C_SUSPEND, UsbPortFeature::SuspendChange),
-        (USB_PORT_STAT_C_OVERCURRENT, UsbPortFeature::OverCurrentChange),
-        (USB_PORT_STAT_C_RESET, UsbPortFeature::ResetChange),
-    ] {
-        if status.port_change_status & changed_bit != 0 {
-            if let Some(device) = unsafe { interface.device.as_mut() } {
-                let _ = unsafe { usb_hub_ctrl_clear_port_feature(device, port, feature as u16) };
-            }
-        }
-    }
-}
-
-/// Sets a feature on a normal hub port.
-pub unsafe fn usb_hub_set_port_feature(interface: &mut UsbInterface, port: u8, feature: UsbPortFeature) -> efi::Status {
-    let Some(device) = (unsafe { interface.device.as_mut() }) else {
-        return efi::Status::INVALID_PARAMETER;
-    };
-    unsafe { usb_hub_ctrl_set_port_feature(device, port, feature) }
-}
-
-/// Clears a feature on a normal hub port.
-pub unsafe fn usb_hub_clear_port_feature(interface: &mut UsbInterface, port: u8, feature: UsbPortFeature) -> efi::Status {
-    let Some(device) = (unsafe { interface.device.as_mut() }) else {
-        return efi::Status::INVALID_PARAMETER;
-    };
-    unsafe { usb_hub_ctrl_clear_port_feature_enum(device, port, feature) }
-}
-
-/// Resets a normal hub port and waits for the reset-change indication.
-unsafe fn usb_hub_reset_port<U: BootServices>(
-    interface: &mut UsbInterface,
-    port: u8,
-    boot_services: &U,
-) -> efi::Status {
-    let status = unsafe { usb_hub_set_port_feature(interface, port, UsbPortFeature::Reset) };
-    if status != efi::Status::SUCCESS {
-        return status;
-    }
-    for _ in 0..USB_WAIT_PORT_STS_CHANGE_LOOP {
-        let mut port_status = UsbPortStatus { port_status: 0, port_change_status: 0 };
-        if unsafe { usb_hub_get_port_status(interface, port, &mut port_status) } != efi::Status::SUCCESS {
-            return efi::Status::DEVICE_ERROR;
-        }
-        if port_status.port_change_status & USB_PORT_STAT_C_RESET != 0 {
-            let _ = boot_services.stall(USB_SET_PORT_RECOVERY_STALL as usize);
-            return efi::Status::SUCCESS;
-        }
-        let _ = boot_services.stall(USB_WAIT_PORT_STS_CHANGE_STALL as usize);
-    }
-    efi::Status::TIMEOUT
-}
-
-/// Releases normal-hub state and closes its Boot Services event.
-pub fn usb_hub_release<U: BootServices>(interface: &mut UsbInterface, boot_services: &U) -> efi::Status {
-    if !interface.hub_notify.is_null() {
-        if let Err(status) = boot_services.close_event(interface.hub_notify) {
-            return status;
-        }
-    }
-    interface.is_hub = false.into();
-    interface.hub_api = core::ptr::null_mut();
-    interface.hub_ep = core::ptr::null_mut();
-    interface.hub_notify = core::ptr::null_mut();
-    efi::Status::SUCCESS
-}
-
-/// Initializes a normal hub and registers its Boot Services event and interrupt poll.
-pub unsafe fn usb_hub_init<U: BootServices + 'static>(
-    interface: &mut UsbInterface,
-    boot_services: &'static U,
-) -> efi::Status {
-    if !unsafe { usb_is_hub_interface(interface) } {
-        return efi::Status::DEVICE_ERROR;
-    }
-    let Some(setting) = (unsafe { interface.if_setting.as_ref() }) else {
-        return efi::Status::INVALID_PARAMETER;
-    };
-    let endpoint = (0..setting.descriptor.num_endpoints)
-        .filter_map(|index| unsafe { setting.endpoints.add(index as usize).as_ref() })
-        .find(|endpoint| unsafe {
-            (***endpoint).descriptor.endpoint_address & 0x80 != 0
-                && usb_endpoint_type((***endpoint).descriptor.attributes) == 3
-        })
-        .copied();
-    let Some(endpoint) = endpoint else { return efi::Status::DEVICE_ERROR };
-    let Some(device) = (unsafe { interface.device.as_mut() }) else {
-        return efi::Status::INVALID_PARAMETER;
-    };
-    let descriptor = unsafe { usb_hub_read_desc(device) };
-    let Some(descriptor) = descriptor else { return efi::Status::DEVICE_ERROR };
-    if descriptor.len() < 3 {
-        return efi::Status::DEVICE_ERROR;
-    }
-    interface.is_hub = true.into();
-    interface.num_of_port = descriptor[2];
-    interface.hub_ep = endpoint as *const _ as *mut _;
-
-    let event = match boot_services.create_event(
-        EventType::NOTIFY_SIGNAL,
-        Tpl::CALLBACK,
-        Some(usb_hub_enumeration),
-        interface as *mut UsbInterface as *mut c_void,
-    ) {
-        Ok(event) => event,
-        Err(status) => return status,
-    };
-    interface.hub_notify = event;
-
-    let Some(endpoint) = (unsafe { interface.hub_ep.as_ref() }) else {
-        let _ = boot_services.close_event(event);
-        interface.hub_notify = core::ptr::null_mut();
-        return efi::Status::DEVICE_ERROR;
-    };
-    let interrupt_context = Box::new(UsbHubInterruptContext {
-        interface: interface as *mut UsbInterface,
-        boot_services,
-    });
-    let interrupt_context = Box::into_raw(interrupt_context);
-    let status = unsafe {
-        (interface.usb_io.async_interrupt_transfer)(
-            &mut interface.usb_io,
-            endpoint.descriptor.endpoint_address,
-            true.into(),
-            USB_HUB_POLL_INTERVAL as usize,
-            interface.num_of_port as usize / 8 + 1,
-            Some(usb_on_hub_interrupt::<U>),
-            interrupt_context.cast(),
-        )
-    };
-    if status != efi::Status::SUCCESS {
-        drop(unsafe { Box::from_raw(interrupt_context) });
-        let _ = boot_services.close_event(event);
-        interface.hub_notify = core::ptr::null_mut();
-        interface.is_hub = false.into();
-    }
-    status
-}
-
-/// Initializes a root hub and configures its periodic Boot Services timer.
-pub unsafe fn usb_root_hub_init<U: BootServices + 'static>(
-    interface: &mut UsbInterface,
-    boot_services: &'static U,
-) -> efi::Status {
-    let Some(device) = (unsafe { interface.device.as_ref() }) else {
-        return efi::Status::INVALID_PARAMETER;
-    };
-    let Some(bus) = (unsafe { device.bus.as_mut() }) else {
-        return efi::Status::INVALID_PARAMETER;
-    };
-    let mut max_speed = 0;
-    let mut num_ports = 0;
-    let mut support_64 = 0;
-    let status = unsafe { usb_hc_get_capability(bus, &mut max_speed, &mut num_ports, &mut support_64) };
-    if status != efi::Status::SUCCESS {
-        return status;
-    }
-    interface.is_hub = true.into();
-    interface.max_speed = max_speed;
-    interface.num_of_port = num_ports;
-
-    let event = match boot_services.create_event(
-        EventType::TIMER | EventType::NOTIFY_SIGNAL,
-        Tpl::CALLBACK,
-        Some(usb_root_hub_enumeration),
-        interface as *mut UsbInterface as *mut c_void,
-    ) {
-        Ok(event) => event,
-        Err(status) => return status,
-    };
-    interface.hub_notify = event;
-    if let Err(status) = boot_services.signal_event(event) {
-        let _ = boot_services.close_event(event);
-        interface.hub_notify = core::ptr::null_mut();
-        interface.is_hub = false.into();
-        return status;
-    }
-    if let Err(status) = boot_services.set_timer(
-        event,
-        EventTimerType::Periodic,
-        USB_ROOTHUB_POLL_INTERVAL,
-    ) {
-        let _ = boot_services.close_event(event);
-        interface.hub_notify = core::ptr::null_mut();
-        interface.is_hub = false.into();
-        return status;
-    }
-    efi::Status::SUCCESS
-}
-
-/// Reads a root-hub port status through the host-controller protocol.
-pub unsafe fn usb_root_hub_get_port_status(interface: &mut UsbInterface, port: u8, status: &mut UsbPortStatus) -> efi::Status {
-    let Some(device) = (unsafe { interface.device.as_ref() }) else { return efi::Status::INVALID_PARAMETER };
-    let Some(bus) = (unsafe { device.bus.as_mut() }) else { return efi::Status::INVALID_PARAMETER };
-    unsafe { usb_hc_get_root_hub_port_status(bus, port, status) }
-}
-
-/// Sets a root-hub port feature.
-pub unsafe fn usb_root_hub_set_port_feature(interface: &mut UsbInterface, port: u8, feature: UsbPortFeature) -> efi::Status {
-    let Some(device) = (unsafe { interface.device.as_ref() }) else { return efi::Status::INVALID_PARAMETER };
-    let Some(bus) = (unsafe { device.bus.as_mut() }) else { return efi::Status::INVALID_PARAMETER };
-    unsafe { usb_hc_set_root_hub_port_feature(bus, port, feature) }
-}
-
-/// Clears a root-hub port feature.
-pub unsafe fn usb_root_hub_clear_port_feature(interface: &mut UsbInterface, port: u8, feature: UsbPortFeature) -> efi::Status {
-    let Some(device) = (unsafe { interface.device.as_ref() }) else { return efi::Status::INVALID_PARAMETER };
-    let Some(bus) = (unsafe { device.bus.as_mut() }) else { return efi::Status::INVALID_PARAMETER };
-    unsafe { usb_hc_clear_root_hub_port_feature(bus, port, feature) }
-}
-
-/// Releases root-hub state and closes its Boot Services timer event.
-pub fn usb_root_hub_release<U: BootServices>(
-    interface: &mut UsbInterface,
-    boot_services: &U,
-) -> efi::Status {
-    if !interface.hub_notify.is_null() {
-        if let Err(status) = boot_services.set_timer(interface.hub_notify, EventTimerType::Cancel, 0) {
-            return status;
-        }
-        if let Err(status) = boot_services.close_event(interface.hub_notify) {
-            return status;
-        }
-    }
-    interface.is_hub = false.into();
-    interface.hub_api = core::ptr::null_mut();
-    interface.hub_notify = core::ptr::null_mut();
-    efi::Status::SUCCESS
-}
-
-/// Clears all reported change bits on a root-hub port.
-pub unsafe fn usb_root_hub_clear_port_change(interface: &mut UsbInterface, port: u8) {
-    let mut status = UsbPortStatus { port_status: 0, port_change_status: 0 };
-    if unsafe { usb_root_hub_get_port_status(interface, port, &mut status) } != efi::Status::SUCCESS {
-        return;
-    }
-    for (changed_bit, feature) in [
-        (USB_PORT_STAT_C_CONNECTION, UsbPortFeature::ConnectChange),
-        (USB_PORT_STAT_C_ENABLE, UsbPortFeature::EnableChange),
-        (USB_PORT_STAT_C_SUSPEND, UsbPortFeature::SuspendChange),
-        (USB_PORT_STAT_C_OVERCURRENT, UsbPortFeature::OverCurrentChange),
-        (USB_PORT_STAT_C_RESET, UsbPortFeature::ResetChange),
-    ] {
-        if status.port_change_status & changed_bit != 0 {
-            let _ = unsafe { usb_root_hub_clear_port_feature(interface, port, feature) };
-        }
-    }
-}
-
-/// Resets a root-hub port and waits for reset completion.
-pub unsafe fn usb_root_hub_reset_port(interface: &mut UsbInterface, port: u8) -> efi::Status {
-    let status = unsafe { usb_root_hub_set_port_feature(interface, port, UsbPortFeature::Reset) };
-    if status != efi::Status::SUCCESS {
-        return status;
-    }
-    for _ in 0..USB_WAIT_PORT_STS_CHANGE_LOOP {
-        let mut port_status = UsbPortStatus { port_status: 0, port_change_status: 0 };
-        let status = unsafe { usb_root_hub_get_port_status(interface, port, &mut port_status) };
-        if status != efi::Status::SUCCESS {
-            return status;
-        }
-        if port_status.port_change_status & USB_PORT_STAT_C_RESET != 0 {
-            let _ = unsafe { usb_root_hub_clear_port_feature(interface, port, UsbPortFeature::ResetChange) };
-            if port_status.port_status & USB_PORT_STAT_RESET == 0 {
-                return efi::Status::SUCCESS;
-            }
-        }
-    }
-    efi::Status::TIMEOUT
-}
-
-/// Processes a hub interrupt completion. Event signaling and transfer resubmission
-/// require Boot Services integration that is not yet represented in this crate.
+/// Processes a hub interrupt completion.
 pub unsafe extern "efiapi" fn usb_on_hub_interrupt<U: BootServices + 'static>(
     data: *mut c_void,
     data_length: usize,
@@ -575,9 +281,418 @@ pub unsafe extern "efiapi" fn usb_on_hub_interrupt<U: BootServices + 'static>(
     }
 
     let change_map = unsafe { core::slice::from_raw_parts(data.cast::<u8>(), data_length) };
-    let change_map = change_map.to_vec().into_boxed_slice();
+    let mut copied_map = Vec::new();
+    if copied_map.try_reserve_exact(data_length).is_err() {
+        return efi::Status::OUT_OF_RESOURCES;
+    }
+    copied_map.extend_from_slice(change_map);
+    let change_map = copied_map.into_boxed_slice();
+    if !interface.change_map.is_null() && interface.change_map_length != 0 {
+        drop(unsafe {
+            Box::from_raw(core::ptr::slice_from_raw_parts_mut(
+                interface.change_map,
+                interface.change_map_length,
+            ))
+        });
+    }
     interface.change_map = Box::into_raw(change_map).cast::<u8>();
+    interface.change_map_length = data_length;
     let _ = context.boot_services.signal_event(interface.hub_notify);
 
+    efi::Status::SUCCESS
+}
+
+/// Initializes a normal hub and registers its Boot Services event and interrupt poll.
+pub unsafe fn usb_hub_init<U: BootServices + 'static>(
+    interface: &mut UsbInterface,
+    boot_services: &'static U,
+) -> efi::Status {
+    if !unsafe { usb_is_hub_interface(interface) } {
+        return efi::Status::DEVICE_ERROR;
+    }
+    let Some(setting) = (unsafe { interface.if_setting.as_ref() }) else {
+        return efi::Status::INVALID_PARAMETER;
+    };
+    let endpoint = (0..setting.descriptor.num_endpoints)
+        .filter_map(|index| unsafe { setting.endpoints.add(index as usize).as_ref() })
+        .find(|endpoint| unsafe {
+            (***endpoint).descriptor.endpoint_address & 0x80 != 0
+                && usb_endpoint_type((***endpoint).descriptor.attributes) == 3
+        })
+        .copied();
+    let Some(endpoint) = endpoint else { return efi::Status::DEVICE_ERROR };
+    let Some(device) = (unsafe { interface.device.as_mut() }) else {
+        return efi::Status::INVALID_PARAMETER;
+    };
+    let descriptor = unsafe { usb_hub_read_desc(device) };
+    let Some(descriptor) = descriptor else { return efi::Status::DEVICE_ERROR };
+    if descriptor.len() < 3 {
+        return efi::Status::DEVICE_ERROR;
+    }
+
+    if device.speed == EFI_USB_SPEED_SUPER {
+        let depth = device.tier.saturating_sub(1) as u16;
+        let _ = unsafe { usb_hub_ctrl_set_hub_depth(device, depth) };
+        for port in 0..descriptor[2] {
+            let _ = unsafe {
+                usb_hub_ctrl_set_port_feature(
+                    device,
+                    port,
+                    USB_HUB_PORT_REMOTE_WAKE_MASK,
+                )
+            };
+        }
+    } else {
+        for port in 0..descriptor[2] {
+            let _ = unsafe {
+                usb_hub_ctrl_set_port_feature(device, port, USB_HUB_PORT_POWER)
+            };
+        }
+
+        if descriptor.len() > 5 && descriptor[5] != 0 {
+            let _ = boot_services.stall(
+                descriptor[5] as usize * USB_SET_PORT_POWER_STALL as usize,
+            );
+        }
+        let _ = unsafe { usb_hub_ack_hub_status(device) };
+    }
+
+    interface.is_hub = true.into();
+    interface.num_of_port = descriptor[2];
+    interface.hub_ep = endpoint as *const _ as *mut _;
+    interface.hub_interrupt_context = core::ptr::null_mut();
+
+    let event = match boot_services.create_event(
+        EventType::NOTIFY_SIGNAL,
+        Tpl::CALLBACK,
+        Some(usb_hub_enumeration),
+        interface as *mut UsbInterface as *mut c_void,
+    ) {
+        Ok(event) => event,
+        Err(status) => return status,
+    };
+    interface.hub_notify = event;
+
+    let Some(endpoint) = (unsafe { interface.hub_ep.as_ref() }) else {
+        let _ = boot_services.close_event(event);
+        interface.hub_notify = core::ptr::null_mut();
+        return efi::Status::DEVICE_ERROR;
+    };
+    let interrupt_context = Box::new(UsbHubInterruptContext {
+        interface: interface as *mut UsbInterface,
+        boot_services,
+    });
+    let interrupt_context = Box::into_raw(interrupt_context);
+    interface.hub_interrupt_context = interrupt_context.cast();
+    let status = unsafe {
+        (interface.usb_io.async_interrupt_transfer)(
+            &mut interface.usb_io,
+            endpoint.descriptor.endpoint_address,
+            true.into(),
+            USB_HUB_POLL_INTERVAL as usize,
+            interface.num_of_port as usize / 8 + 1,
+            Some(usb_on_hub_interrupt::<U>),
+            interrupt_context.cast(),
+        )
+    };
+    if status != efi::Status::SUCCESS {
+        drop(unsafe { Box::from_raw(interrupt_context) });
+        interface.hub_interrupt_context = core::ptr::null_mut();
+        let _ = boot_services.close_event(event);
+        interface.hub_notify = core::ptr::null_mut();
+        interface.is_hub = false.into();
+    }
+    status
+}
+/// Retrieves and acknowledges a normal hub port status.
+pub unsafe fn usb_hub_get_port_status(
+    interface: &mut UsbInterface,
+    port: u8,
+    status: &mut UsbPortStatus,
+) -> efi::Status {
+    let Some(device) = (unsafe { interface.device.as_mut() }) else {
+        return efi::Status::INVALID_PARAMETER;
+    };
+    unsafe { usb_hub_ctrl_get_port_status(device, port, status) }
+}
+
+/// Clears all reported change bits on a normal hub port.
+pub unsafe fn usb_hub_clear_port_change(interface: &mut UsbInterface, port: u8) {
+    let mut status = UsbPortStatus { port_status: 0, port_change_status: 0 };
+    if unsafe { usb_hub_get_port_status(interface, port, &mut status) } != efi::Status::SUCCESS {
+        return;
+    }
+    for (changed_bit, feature) in [
+        (USB_PORT_STAT_C_CONNECTION, UsbPortFeature::ConnectChange),
+        (USB_PORT_STAT_C_ENABLE, UsbPortFeature::EnableChange),
+        (USB_PORT_STAT_C_SUSPEND, UsbPortFeature::SuspendChange),
+        (USB_PORT_STAT_C_OVERCURRENT, UsbPortFeature::OverCurrentChange),
+        (USB_PORT_STAT_C_RESET, UsbPortFeature::ResetChange),
+    ] {
+        if status.port_change_status & changed_bit != 0 {
+            if let Some(device) = unsafe { interface.device.as_mut() } {
+                let _ = unsafe { usb_hub_ctrl_clear_port_feature(device, port, feature as u16) };
+            }
+        }
+    }
+}
+
+/// Sets a feature on a normal hub port.
+pub unsafe fn usb_hub_set_port_feature(interface: &mut UsbInterface, port: u8, feature: UsbPortFeature) -> efi::Status {
+    let Some(device) = (unsafe { interface.device.as_mut() }) else {
+        return efi::Status::INVALID_PARAMETER;
+    };
+    unsafe { usb_hub_ctrl_set_port_feature(device, port, feature as u16) }
+}
+
+/// Clears a feature on a normal hub port.
+pub unsafe fn usb_hub_clear_port_feature(interface: &mut UsbInterface, port: u8, feature: UsbPortFeature) -> efi::Status {
+    let Some(device) = (unsafe { interface.device.as_mut() }) else {
+        return efi::Status::INVALID_PARAMETER;
+    };
+    unsafe { usb_hub_ctrl_clear_port_feature(device, port, feature as u16) }
+}
+
+/// Resets a normal hub port and waits for the reset-change indication.
+unsafe fn usb_hub_reset_port<U: BootServices>(
+    interface: &mut UsbInterface,
+    port: u8,
+    boot_services: &U,
+) -> efi::Status {
+    let status = unsafe { usb_hub_set_port_feature(interface, port, UsbPortFeature::Reset) };
+    if status != efi::Status::SUCCESS {
+        return status;
+    }
+
+    // Per USB 2.0, the reset signal must be driven for the full reset pulse
+    // duration before checking for the reset-complete change bit.
+    let _ = boot_services.stall(USB_SET_PORT_RESET_STALL as usize);
+
+    for _ in 0..USB_WAIT_PORT_STS_CHANGE_LOOP {
+        let mut port_status = UsbPortStatus { port_status: 0, port_change_status: 0 };
+        let status = unsafe { usb_hub_get_port_status(interface, port, &mut port_status) };
+        if status != efi::Status::SUCCESS {
+            return status;
+        }
+        if port_status.port_change_status & USB_PORT_STAT_C_RESET != 0 {
+            let _ = boot_services.stall(USB_SET_PORT_RECOVERY_STALL as usize);
+            return efi::Status::SUCCESS;
+        }
+        let _ = boot_services.stall(USB_WAIT_PORT_STS_CHANGE_STALL as usize);
+    }
+    efi::Status::TIMEOUT
+}
+
+/// Releases normal-hub state and closes its Boot Services event.
+pub fn usb_hub_release<U: BootServices + 'static>(interface: &mut UsbInterface, boot_services: &U) -> efi::Status {
+    if !interface.hub_ep.is_null() {
+        let status = unsafe {
+            (interface.usb_io.async_interrupt_transfer)(
+                &mut interface.usb_io,
+                (*interface.hub_ep).descriptor.endpoint_address,
+                false.into(),
+                USB_HUB_POLL_INTERVAL as usize,
+                0,
+                None,
+                core::ptr::null_mut(),
+            )
+        };
+        if status != efi::Status::SUCCESS {
+            return status;
+        }
+    }
+
+    if !interface.hub_notify.is_null() {
+        if let Err(status) = boot_services.close_event(interface.hub_notify) {
+            return status;
+        }
+    }
+
+    if !interface.hub_interrupt_context.is_null() {
+        drop(unsafe {
+            Box::from_raw(interface.hub_interrupt_context as *mut UsbHubInterruptContext<U>)
+        });
+    }
+
+    interface.is_hub = false.into();
+    interface.hub_api = core::ptr::null_mut();
+    interface.hub_ep = core::ptr::null_mut();
+    interface.hub_interrupt_context = core::ptr::null_mut();
+    interface.hub_notify = core::ptr::null_mut();
+    efi::Status::SUCCESS
+}
+
+/// Initializes a root hub and configures its periodic Boot Services timer.
+pub unsafe fn usb_root_hub_init<U: BootServices + 'static>(
+    interface: &mut UsbInterface,
+    boot_services: &'static U,
+) -> efi::Status {
+    let Some(device) = (unsafe { interface.device.as_ref() }) else {
+        return efi::Status::INVALID_PARAMETER;
+    };
+    let Some(bus) = (unsafe { device.bus.as_mut() }) else {
+        return efi::Status::INVALID_PARAMETER;
+    };
+    let mut max_speed = 0;
+    let mut num_ports = 0;
+    let mut support_64 = 0;
+    let status = unsafe { usb_hc_get_capability(bus, &mut max_speed, &mut num_ports, &mut support_64) };
+    if status != efi::Status::SUCCESS {
+        return status;
+    }
+
+    // The original MU_BASECORE implementation initializes the root-hub interface
+    // state before the timer is started and then waits for a minimum number of
+    // poll cycles to avoid delaying enumeration by one timer interval.
+    interface.is_hub = true.into();
+    interface.hub_api = core::ptr::null_mut();
+    interface.hub_ep = core::ptr::null_mut();
+    interface.max_speed = max_speed;
+    interface.num_of_port = num_ports;
+    interface.poll_count = 0;
+
+    let event = match boot_services.create_event(
+        EventType::TIMER | EventType::NOTIFY_SIGNAL,
+        Tpl::CALLBACK,
+        Some(usb_root_hub_enumeration),
+        interface as *mut UsbInterface as *mut c_void,
+    ) {
+        Ok(event) => event,
+        Err(status) => return status,
+    };
+    interface.hub_notify = event;
+
+    if let Err(status) = boot_services.signal_event(event) {
+        let _ = boot_services.close_event(event);
+        interface.hub_notify = core::ptr::null_mut();
+        interface.is_hub = false.into();
+        return status;
+    }
+
+    if let Err(status) = boot_services.set_timer(
+        event,
+        EventTimerType::Periodic,
+        USB_ROOTHUB_POLL_INTERVAL,
+    ) {
+        let _ = boot_services.close_event(event);
+        interface.hub_notify = core::ptr::null_mut();
+        interface.is_hub = false.into();
+        return status;
+    }
+
+    // Wait for timer callbacks to record the minimum number of root-hub polls.
+    while interface.poll_count < USB_ENUM_POLL_MINIMUM_ATTEMPTS {
+        let _ = boot_services.stall(USB_ROOTHUB_POLL_INTERVAL as usize);
+    }
+
+    efi::Status::SUCCESS
+}
+
+/// Reads a root-hub port status through the host-controller protocol.
+pub unsafe fn usb_root_hub_get_port_status(interface: &mut UsbInterface, port: u8, status: &mut UsbPortStatus) -> efi::Status {
+    let Some(device) = (unsafe { interface.device.as_ref() }) else { return efi::Status::INVALID_PARAMETER };
+    let Some(bus) = (unsafe { device.bus.as_mut() }) else { return efi::Status::INVALID_PARAMETER };
+    unsafe { usb_hc_get_root_hub_port_status(bus, port, status) }
+}
+
+/// Clears all reported change bits on a root-hub port.
+pub unsafe fn usb_root_hub_clear_port_change(interface: &mut UsbInterface, port: u8) {
+    let mut status = UsbPortStatus { port_status: 0, port_change_status: 0 };
+    if unsafe { usb_root_hub_get_port_status(interface, port, &mut status) } != efi::Status::SUCCESS {
+        return;
+    }
+    for (changed_bit, feature) in [
+        (USB_PORT_STAT_C_CONNECTION, UsbPortFeature::ConnectChange),
+        (USB_PORT_STAT_C_ENABLE, UsbPortFeature::EnableChange),
+        (USB_PORT_STAT_C_SUSPEND, UsbPortFeature::SuspendChange),
+        (USB_PORT_STAT_C_OVERCURRENT, UsbPortFeature::OverCurrentChange),
+        (USB_PORT_STAT_C_RESET, UsbPortFeature::ResetChange),
+    ] {
+        if status.port_change_status & changed_bit != 0 {
+            let _ = unsafe { usb_root_hub_clear_port_feature(interface, port, feature) };
+        }
+    }
+}
+
+/// Sets a root-hub port feature.
+pub unsafe fn usb_root_hub_set_port_feature(interface: &mut UsbInterface, port: u8, feature: UsbPortFeature) -> efi::Status {
+    let Some(device) = (unsafe { interface.device.as_ref() }) else { return efi::Status::INVALID_PARAMETER };
+    let Some(bus) = (unsafe { device.bus.as_mut() }) else { return efi::Status::INVALID_PARAMETER };
+    unsafe { usb_hc_set_root_hub_port_feature(bus, port, feature) }
+}
+
+/// Clears a root-hub port feature.
+pub unsafe fn usb_root_hub_clear_port_feature(interface: &mut UsbInterface, port: u8, feature: UsbPortFeature) -> efi::Status {
+    let Some(device) = (unsafe { interface.device.as_ref() }) else { return efi::Status::INVALID_PARAMETER };
+    let Some(bus) = (unsafe { device.bus.as_mut() }) else { return efi::Status::INVALID_PARAMETER };
+    unsafe { usb_hc_clear_root_hub_port_feature(bus, port, feature) }
+}
+
+/// Resets a root-hub port and waits for reset completion.
+pub unsafe fn usb_root_hub_reset_port<U: BootServices>(interface: &mut UsbInterface, port: u8, boot_services: &U) -> efi::Status {
+    let status = unsafe { usb_root_hub_set_port_feature(interface, port, UsbPortFeature::Reset) };
+    if status != efi::Status::SUCCESS {
+        return status;
+    }
+
+    let _ = boot_services.stall(USB_SET_ROOT_PORT_RESET_STALL as usize);
+
+    let status = unsafe { usb_root_hub_clear_port_feature(interface, port, UsbPortFeature::Reset) };
+    if status != efi::Status::SUCCESS {
+        return status;
+    }
+
+    let _ = boot_services.stall(USB_CLR_ROOT_PORT_RESET_STALL as usize);
+
+    let mut port_status = UsbPortStatus { port_status: 0, port_change_status: 0 };
+    let mut reset_finished = false;
+    for _ in 0..USB_WAIT_PORT_STS_CHANGE_LOOP {
+        let status = unsafe { usb_root_hub_get_port_status(interface, port, &mut port_status) };
+        if status != efi::Status::SUCCESS {
+            return status;
+        }
+        if port_status.port_status & USB_PORT_STAT_RESET == 0 {
+            reset_finished = true;
+            break;
+        }
+        let _ = boot_services.stall(USB_WAIT_PORT_STS_CHANGE_STALL as usize);
+    }
+
+    if !reset_finished {
+        return efi::Status::TIMEOUT;
+    }
+
+    if port_status.port_status & USB_PORT_STAT_ENABLE == 0 {
+        if interface.max_speed == EFI_USB_SPEED_HIGH {
+            let _ = unsafe { usb_root_hub_set_port_feature(interface, port, UsbPortFeature::Owner) };
+            return efi::Status::NOT_FOUND;
+        }
+
+        let status = unsafe { usb_root_hub_set_port_feature(interface, port, UsbPortFeature::Enable) };
+        if status != efi::Status::SUCCESS {
+            return status;
+        }
+        let _ = boot_services.stall(USB_SET_ROOT_PORT_ENABLE_STALL as usize);
+    }
+
+    efi::Status::SUCCESS
+}
+
+/// Releases root-hub state and closes its Boot Services timer event.
+pub fn usb_root_hub_release<U: BootServices>(
+    interface: &mut UsbInterface,
+    boot_services: &U,
+) -> efi::Status {
+    if !interface.hub_notify.is_null() {
+        if let Err(status) = boot_services.set_timer(interface.hub_notify, EventTimerType::Cancel, 0) {
+            return status;
+        }
+        if let Err(status) = boot_services.close_event(interface.hub_notify) {
+            return status;
+        }
+    }
+    interface.is_hub = false.into();
+    interface.hub_api = core::ptr::null_mut();
+    interface.hub_notify = core::ptr::null_mut();
     efi::Status::SUCCESS
 }
