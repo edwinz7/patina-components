@@ -29,8 +29,8 @@ pub(crate) mod usb_utility;
 //pub(crate) mod test_stubs;
 
 use alloc::boxed::Box;
+use core::mem::MaybeUninit;
 use core::ptr;
-use core::ptr::NonNull;
 use r_efi::efi;
 
 use patina::{
@@ -41,7 +41,7 @@ use patina::{
             Service,
             uefi_services::{
                 driver_model::driver_binding::DriverBinding,
-                protocol::{Handle, OpenAttributes, ProtocolError, ProtocolServices, ProtocolServicesExt},
+                protocol::{Handle, OpenAttributes, ProtocolError, ProtocolPtr, ProtocolServices, ProtocolServicesExt},
             }, 
         },
         params
@@ -56,15 +56,15 @@ use patina::{
     protocol::ProtocolInterface,
 };
 
-use crate::usb_bus_defs::EfiUsbBusProtocol;
 use crate::usb_2_host_controller::Protocol as Usb2HcProtocol;
+use crate::usb_bus_defs::{
+    EfiUsbBusProtocol, USB_BUS_SIGNATURE, USB_INTERFACE_SIGNATURE, USB_MAX_DEVICES, UsbBus, UsbDevice, UsbInterface,
+};
 
 pub struct UsbBusDriver {
     protocols: Service<dyn ProtocolServices>,
 }
 
-// efi::Handle is an opaque *mut c_void that is never actually dereferenced as a pointer.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
 impl DriverBinding for UsbBusDriver {
     /// Tests if the given controller has USB IO with HID interface class.
     #[coverage(off)]
@@ -233,39 +233,47 @@ fn usb_bus_build_protocol(
     controller: Handle,
     remaining_device_path: Option<DevicePathWalker>,
 ) -> core::result::Result<(), ProtocolError> {
-    let _ = (protocols, agent, controller, remaining_device_path);
-/*
-    let device_path = unsafe {
-        boot_services.open_protocol::<EfiDevicePathProtocol>(
-            controller,
-            agent,
-            controller,
-            efi::OPEN_PROTOCOL_BY_DRIVER,
-        )?
-    };
+    let _ = remaining_device_path;
 
-    let usb2_hc = match unsafe {
-        boot_services.open_protocol::<Usb2HcProtocol>(controller, agent, controller, efi::OPEN_PROTOCOL_BY_DRIVER)
-    } {
+    let device_path = protocols.open_interface(
+        controller,
+        device_path_temp::Protocol::PROTOCOL_GUID,
+        agent,
+        OpenAttributes::ByDriver { controller },
+    )?;
+
+    let usb2_hc = match protocols.open_interface(
+        controller,
+        Usb2HcProtocol::PROTOCOL_GUID,
+        agent,
+        OpenAttributes::ByDriver { controller },
+    ) {
         Ok(usb2_hc) => usb2_hc,
         Err(status) => {
-            boot_services.close_protocol(controller, &device_path::PROTOCOL_GUID, agent, controller).ok();
+            protocols
+                .close_interface(controller, device_path_temp::Protocol::PROTOCOL_GUID, agent, Some(controller))
+                .ok();
             return Err(status);
         }
     };
 
+    let device_path_ptr = device_path.as_raw().cast::<efi::protocols::device_path::Protocol>();
+    let usb2_hc_ptr = usb2_hc.as_raw().cast::<Usb2HcProtocol>();
+
     let mut bus = Box::new(UsbBus {
         signature: USB_BUS_SIGNATURE as usize,
         bus_id: EfiUsbBusProtocol { reserved: 0 },
-        host_handle: controller,
-        device_path: device_path as *mut _,
-        usb2_hc: usb2_hc as *mut Usb2HcProtocol as *mut _,
+        host_handle: controller.as_raw(),
+        device_path: device_path_ptr,
+        usb2_hc: usb2_hc_ptr,
         max_devices: USB_MAX_DEVICES as u32,
         devices: [ptr::null_mut(); 256],
         wanted_usb_io_dp_list: list_entry::Entry { forward_link: ptr::null_mut(), back_link: ptr::null_mut() },
     });
 
-    if usb2_hc.major_revision == 0x3 {
+    // SAFETY: `usb2_hc_ptr` came from the interface registered for `Usb2HcProtocol` and
+    // remains open by this driver for the lifetime of the bus.
+    if unsafe { (*usb2_hc_ptr).major_revision == 0x3 } {
         bus.max_devices = 256;
     }
 
@@ -288,11 +296,11 @@ fn usb_bus_build_protocol(
         connected: false.into(),
         disconnect_fail: false.into(),
     });
-    let root_if = Box::new(MaybeUninit::<UsbInterface>::uninit());
+    let mut root_if = Box::new(MaybeUninit::<UsbInterface>::zeroed());
 
     let bus_ptr = &mut *bus as *mut UsbBus;
     let root_hub_ptr = &mut *root_hub as *mut UsbDevice;
-    let root_if_ptr = root_if.as_ptr() as *mut UsbInterface;
+    let root_if_ptr = root_if.as_mut_ptr();
     let list_head = &mut bus.wanted_usb_io_dp_list as *mut list_entry::Entry;
     bus.wanted_usb_io_dp_list.forward_link = list_head;
     bus.wanted_usb_io_dp_list.back_link = list_head;
@@ -301,21 +309,24 @@ fn usb_bus_build_protocol(
     unsafe {
         ptr::addr_of_mut!((*root_if_ptr).signature).write(USB_INTERFACE_SIGNATURE as usize);
         ptr::addr_of_mut!((*root_if_ptr).device).write(root_hub_ptr);
-        ptr::addr_of_mut!((*root_if_ptr).device_path).write(device_path as *mut _);
+        ptr::addr_of_mut!((*root_if_ptr).device_path).write(device_path_ptr);
     }
     bus.devices[0] = root_hub_ptr;
 
-    if let Err(status) =
-        boot_services.install_protocol_interface(Some(controller), Box::new(EfiUsbBusProtocol { reserved: 0 }))
-    {
-        boot_services.close_protocol(controller, &usb_2_host_controller::PROTOCOL_GUID, agent, controller).ok();
-        boot_services.close_protocol(controller, &device_path::PROTOCOL_GUID, agent, controller).ok();
+    let bus_id = ProtocolPtr::from_raw(ptr::from_mut(&mut bus.bus_id).cast()).ok_or(ProtocolError::InvalidParameter)?;
+    if let Err(status) = protocols.install_interface(Some(controller), EfiUsbBusProtocol::PROTOCOL_GUID, bus_id) {
+        protocols
+            .close_interface(controller, Usb2HcProtocol::PROTOCOL_GUID, agent, Some(controller))
+            .ok();
+        protocols
+            .close_interface(controller, device_path_temp::Protocol::PROTOCOL_GUID, agent, Some(controller))
+            .ok();
         return Err(status);
     }
 
     Box::leak(bus);
     Box::leak(root_hub);
     Box::leak(root_if);
-*/
+
     Ok(())
 }
