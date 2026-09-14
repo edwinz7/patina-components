@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use core::{ffi::c_void, ptr};
 use r_efi::efi;
 
@@ -100,7 +100,9 @@ pub fn usb_create_interface(device: &mut UsbDevice, descriptor: &mut UsbInterfac
         num_of_port: 0,
         hub_notify: ptr::null_mut(),
         hub_ep: ptr::null_mut(),
+        hub_interrupt_context: ptr::null_mut(),
         change_map: ptr::null_mut(),
+        change_map_length: 0,
         max_speed: 0,
         poll_count: 0,
     }))
@@ -263,7 +265,64 @@ pub fn usb_enumerate_port(_hub_interface: &mut UsbInterface, _port: u8) -> efi::
 }
 
 /// Handles changed ports for a hub interface.
-pub unsafe extern "efiapi" fn usb_hub_enumeration(_event: efi::Event, _context: *mut c_void) {}
+pub unsafe extern "efiapi" fn usb_hub_enumeration(_event: efi::Event, context: *mut c_void) {
+    let Some(interface) = (unsafe { (context as *mut UsbInterface).as_mut() }) else {
+        return;
+    };
+    if interface.change_map.is_null() || interface.change_map_length == 0 {
+        return;
+    }
+
+    let num_of_port = interface.num_of_port as usize;
+    let map = unsafe {
+        core::slice::from_raw_parts(interface.change_map, interface.change_map_length)
+    };
+    let changed_ports: Vec<u8> = map
+        .iter()
+        .enumerate()
+        .flat_map(|(byte_index, byte)| {
+            (0..8).filter_map(move |bit| {
+                if byte & (1 << bit) != 0 {
+                    let port = byte_index * 8 + bit;
+                    (port > 0 && port - 1 < num_of_port).then_some((port - 1) as u8)
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    let map = unsafe {
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(
+            interface.change_map,
+            interface.change_map_length,
+        ))
+    };
+    drop(map);
+    interface.change_map = ptr::null_mut();
+    interface.change_map_length = 0;
+
+    for port in changed_ports {
+        let _ = usb_enumerate_port(interface, port);
+    }
+}
 
 /// Handles changed ports for the root hub.
-pub unsafe extern "efiapi" fn usb_root_hub_enumeration(_event: efi::Event, _context: *mut c_void) {}
+pub unsafe extern "efiapi" fn usb_root_hub_enumeration(_event: efi::Event, context: *mut c_void) {
+    let Some(interface) = (unsafe { (context as *mut UsbInterface).as_mut() }) else {
+        return;
+    };
+    interface.poll_count = interface.poll_count.saturating_add(1);
+    for port in 0..interface.num_of_port {
+        let mut status = UsbPortStatus { port_status: 0, port_change_status: 0 };
+        if unsafe { crate::usb_hub::usb_root_hub_get_port_status(interface, port, &mut status) }
+            != efi::Status::SUCCESS
+        {
+            continue;
+        }
+        if status.port_change_status != 0 {
+            unsafe { crate::usb_hub::usb_root_hub_clear_port_change(interface, port) };
+            let _ = usb_enumerate_port(interface, port);
+        }
+    }
+}

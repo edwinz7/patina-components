@@ -6,8 +6,17 @@
 
 #![allow(dead_code)]
 
-use core::{ffi::c_void, mem, ptr};
-use patina::{BinaryGuid, pi::list_entry, protocol::ProtocolInterface, uefi::boot_services::tpl::Tpl};
+use core::ffi::c_void;
+use patina::{
+    BinaryGuid,
+    pi::list_entry,
+    //component::service::uefi_services::{
+    //    protocol::ProtocolServices,
+    //    tpl::{Tpl, TplServices, TplServicesExt},
+    //},
+    component::service::uefi_services::tpl::Tpl,
+    protocol::ProtocolInterface,
+};
 use r_efi::{
     base::Boolean,
     efi,
@@ -120,7 +129,7 @@ pub const USB_CLEAR_FEATURE_REQUEST_TIMEOUT: u32 = 10;
 // Bus raises TPL to TPL_NOTIFY to serialize all its operations
 // to protect shared data structures.
 //
-pub const USB_BUS_TPL: Tpl = Tpl::NOTIFY;
+pub const USB_BUS_TPL: Tpl = Tpl::Notify;
 
 pub const USB_INTERFACE_SIGNATURE: u64 = signature(b"USBI");
 pub const USB_BUS_SIGNATURE: u64 = signature(b"USBB");
@@ -210,7 +219,9 @@ pub struct UsbInterface {
 
     // Data used only by normal hub devices
     pub hub_ep: *mut UsbEndpointDesc,
+    pub hub_interrupt_context: *mut c_void,
     pub change_map: *mut u8,
+    pub change_map_length: usize,
 
     // Data used only by root hub to hand over device to
     // companion UHCI driver if low/full speed devices are
@@ -283,19 +294,4 @@ pub struct DevicePathListItem {
 pub struct UsbClassFormatDevicePath {
     pub usb_class: [u8; 32],
     pub end: DevicePathProtocol,
-}
-
-pub unsafe fn usb_interface_from_usb_io(this: *mut r_efi::efi::protocols::usb_io::Protocol) -> *mut UsbInterface {
-    // "this" points to UsbInterface.usb_io
-    let base = unsafe { (this as *mut u8).sub(mem::offset_of!(UsbInterface, usb_io) as usize) };
-    let iface = base as *mut UsbInterface;
-
-    unsafe {
-        // Same safety check as the C macro
-        if (*iface).signature != USB_INTERFACE_SIGNATURE as usize {
-            return ptr::null_mut();
-        }
-    }
-
-    iface
 }

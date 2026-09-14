@@ -11,8 +11,8 @@ extern crate alloc;
 use alloc::{vec, vec::Vec};
 use core::{ffi::c_void, mem, ptr};
 
-#[path = "../../protocols/device_path.rs"]
-mod device_path;
+#[path = "../../protocols/device_path_temp.rs"]
+mod device_path_temp;
 
 use patina::uefi::boot_services::BootServices;
 use r_efi::{base::Boolean, efi};
@@ -239,23 +239,23 @@ pub fn usb_get_current_tpl<U: BootServices>(boot_services: &U, current_tpl: efi:
     current_tpl
 }
 
-fn is_end_node(node: &device_path::Protocol) -> bool {
-    node.r#type == device_path::TYPE_END && node.sub_type == device_path::END_ENTIRE_DEVICE_PATH_SUBTYPE
+fn is_end_node(node: &device_path_temp::Protocol) -> bool {
+    node.r#type == device_path_temp::TYPE_END && node.sub_type == device_path_temp::END_ENTIRE_DEVICE_PATH_SUBTYPE
 }
 
-fn is_usb_node(node: &device_path::Protocol) -> bool {
-    node.r#type == device_path::TYPE_MESSAGING
+fn is_usb_node(node: &device_path_temp::Protocol) -> bool {
+    node.r#type == device_path_temp::TYPE_MESSAGING
         && matches!(
             node.sub_type,
-            device_path::MSG_USB_DP | device_path::MSG_USB_CLASS_DP | device_path::MSG_USB_WWID_DP
+            device_path_temp::MSG_USB_DP | device_path_temp::MSG_USB_CLASS_DP | device_path_temp::MSG_USB_WWID_DP
         )
 }
 
-fn node_length(node: &device_path::Protocol) -> usize {
+fn node_length(node: &device_path_temp::Protocol) -> usize {
     u16::from_le_bytes(node.length) as usize
 }
 
-fn device_path_size(path: *const device_path::Protocol) -> Option<usize> {
+fn device_path_temp_size(path: *const device_path_temp::Protocol) -> Option<usize> {
     if path.is_null() {
         return None;
     }
@@ -265,7 +265,7 @@ fn device_path_size(path: *const device_path::Protocol) -> Option<usize> {
         // SAFETY: The caller provides a valid, NUL-terminated UEFI device path.
         let node = unsafe { &*path.byte_add(offset) };
         let length = node_length(node);
-        if length < mem::size_of::<device_path::Protocol>() {
+        if length < mem::size_of::<device_path_temp::Protocol>() {
             return None;
         }
         offset = offset.checked_add(length)?;
@@ -276,8 +276,8 @@ fn device_path_size(path: *const device_path::Protocol) -> Option<usize> {
 }
 
 /// Copies the first contiguous USB portion of a full device path.
-pub fn get_usb_dp_from_full_dp(path: *const device_path::Protocol) -> Option<Vec<u8>> {
-    let total_size = device_path_size(path)?;
+pub fn get_usb_dp_from_full_dp(path: *const device_path_temp::Protocol) -> Option<Vec<u8>> {
+    let total_size = device_path_temp_size(path)?;
     let mut begin = 0;
     while begin < total_size {
         // SAFETY: `begin` is bounded by the validated path size.
@@ -301,17 +301,17 @@ pub fn get_usb_dp_from_full_dp(path: *const device_path::Protocol) -> Option<Vec
         return None;
     }
 
-    let mut result = vec![0; end - begin + mem::size_of::<device_path::Protocol>()];
+    let mut result = vec![0; end - begin + mem::size_of::<device_path_temp::Protocol>()];
     // SAFETY: The source range is within the validated device path.
     unsafe { ptr::copy_nonoverlapping(path.cast::<u8>().add(begin), result.as_mut_ptr(), end - begin) };
-    let end_node = device_path::Protocol {
-        r#type: device_path::TYPE_END,
-        sub_type: device_path::END_ENTIRE_DEVICE_PATH_SUBTYPE,
-        length: (mem::size_of::<device_path::Protocol>() as u16).to_le_bytes(),
+    let end_node = device_path_temp::Protocol {
+        r#type: device_path_temp::TYPE_END,
+        sub_type: device_path_temp::END_ENTIRE_DEVICE_PATH_SUBTYPE,
+        length: (mem::size_of::<device_path_temp::Protocol>() as u16).to_le_bytes(),
     };
     result[end - begin..].copy_from_slice(unsafe {
         core::slice::from_raw_parts(
-            (&end_node as *const device_path::Protocol).cast::<u8>(),
+            (&end_node as *const device_path_temp::Protocol).cast::<u8>(),
             mem::size_of_val(&end_node),
         )
     });

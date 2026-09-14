@@ -14,9 +14,10 @@
 
 extern crate alloc;
 
-pub(crate) mod driver;
 #[path = "../../protocols/usb_2_host_controller.rs"]
 pub(crate) mod usb_2_host_controller;
+#[path = "../../protocols/device_path_temp.rs"]
+pub(crate) mod device_path_temp;
 pub(crate) mod usb_bus_defs;
 pub(crate) mod usb_desc;
 pub(crate) mod usb_enumer;
@@ -28,104 +29,293 @@ pub(crate) mod usb_utility;
 //pub(crate) mod test_stubs;
 
 use alloc::boxed::Box;
+use core::ptr;
+use core::ptr::NonNull;
 use r_efi::efi;
 
 use patina::{
     BinaryGuid,
-    component::{component, params},
-    error::Result,
-    protocol::ProtocolInterface,
-    uefi::{
-        boot_services::{BootServices, StandardBootServices},
-        driver_binding::UefiDriverBinding,
+    component::{
+        component,
+        service::{
+            Service,
+            uefi_services::{
+                driver_model::driver_binding::DriverBinding,
+                protocol::{Handle, OpenAttributes, ProtocolError, ProtocolServices, ProtocolServicesExt},
+            }, 
+        },
+        params
     },
+    error::{Result, EfiError},
+    pi::{
+        list_entry,
+        protocol::status_code,
+        status_code::{EFI_IO_BUS_USB, EFI_IOB_PC_INIT, EFI_PROGRESS_CODE},
+    },
+    uefi::device_path::walker::DevicePathWalker,
+    protocol::ProtocolInterface,
 };
 
-/// Zero-sized marker protocol used to create a dedicated driver binding handle.
-#[repr(C)]
-struct UsbBusMarker;
+use crate::usb_bus_defs::EfiUsbBusProtocol;
+use crate::usb_2_host_controller::Protocol as Usb2HcProtocol;
 
-// SAFETY: UsbBusMarker is a ZST whose GUID uniquely identifies this component.
-unsafe impl ProtocolInterface for UsbBusMarker {
-    const PROTOCOL_GUID: BinaryGuid = BinaryGuid::from_string("dceefc3d-ad07-4986-be64-f5ba2ed6591c");
+pub struct UsbBusDriver {
+    protocols: Service<dyn ProtocolServices>,
+}
+
+// efi::Handle is an opaque *mut c_void that is never actually dereferenced as a pointer.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+impl DriverBinding for UsbBusDriver {
+    /// Tests if the given controller has USB IO with HID interface class.
+    #[coverage(off)]
+    fn supported(
+        &self,
+        agent: Handle,
+        controller: Handle,
+        remaining_device_path: Option<DevicePathWalker>,
+    ) -> core::result::Result<(), ProtocolError> {
+        // SAFETY: Usb2HcProtocol layout matches the USB 2.0 Host Controller GUID.
+
+        if let Some(mut remaining_device_path) = remaining_device_path {
+            let device_path_node = remaining_device_path.next().ok_or(ProtocolError::InvalidParameter)?;
+            let device_path_header = device_path_node.header();
+            let is_end_device_path = device_path_header.r#type == device_path_temp::TYPE_END
+                && device_path_header.sub_type == device_path_temp::END_ENTIRE_DEVICE_PATH_SUBTYPE;
+            if !is_end_device_path {
+                if device_path_header.r#type != device_path_temp::TYPE_MESSAGING
+                    || (device_path_header.sub_type != device_path_temp::MSG_USB_DP
+                        && device_path_header.sub_type != device_path_temp::MSG_USB_CLASS_DP
+                        && device_path_header.sub_type != device_path_temp::MSG_USB_WWID_DP)
+                {
+                    return Err(ProtocolError::from(EfiError::Unsupported));
+                }
+            }
+        }
+
+        if let Err(status) = self.protocols.open_interface(
+            controller,
+            Usb2HcProtocol::PROTOCOL_GUID,
+            agent,
+            OpenAttributes::ByDriver { controller },
+        ) {
+            if status == ProtocolError::AlreadyStarted {
+                return Ok(());
+            } else {
+                return Err(status);
+            }
+        };
+
+        self.protocols
+            .close_interface(controller, Usb2HcProtocol::PROTOCOL_GUID, agent, Some(controller))
+            .ok();
+
+        if let Err(status) = self.protocols.open_interface(
+            controller,
+            device_path_temp::Protocol::PROTOCOL_GUID,
+            agent,
+            OpenAttributes::ByDriver { controller },
+        ) {
+            if status == ProtocolError::AlreadyStarted {
+                return Ok(());
+            } else {
+                return Err(status);
+            }
+        };
+
+        self.protocols
+            .close_interface(controller, device_path_temp::Protocol::PROTOCOL_GUID, agent, Some(controller))
+            .ok();
+
+        Ok(())
+    }
+
+    /// Starts USB Bus support for the given controller.
+    fn start(
+        &self,
+        agent: Handle,
+        controller: Handle,
+        remaining_device_path: Option<DevicePathWalker>,
+    ) -> core::result::Result<(), ProtocolError> {
+        log::trace!("USB Bus: driver_binding_start on controller {:?}", controller);
+
+        let _parent_device_path = self.protocols.open_protocol::<device_path_temp::Protocol>(
+            controller,
+            agent,
+            OpenAttributes::Shared,
+        )?;
+
+        let status = self.protocols.with_protocol::<status_code::StatusCodeProtocol, _>(|protocol| {
+            protocol.report_status_code(
+                EFI_PROGRESS_CODE,
+                EFI_IO_BUS_USB | EFI_IOB_PC_INIT,
+                0,
+                patina::guid::CALLER_ID.as_efi_guid(),
+            )
+        })?;
+        status.map_err(|status| ProtocolError::from(EfiError::from(status)))?;
+
+        let bus_protocol_exists = self
+            .protocols
+            .with_protocol_on::<EfiUsbBusProtocol, _>(controller, |_| ())
+            .is_ok();
+
+        if bus_protocol_exists {
+            //
+            // USB bus driver needs to control the recursive connect policy of the bus, only those wanted
+            // USB child devices will be recursively connected.
+            // remaining_device_path indicates the child USB device which users want to fully recursively connect this time.
+            // All wanted USB child devices will be remembered by the USB bus driver itself.
+            // If remaining_device_path is NULL, all the USB child devices in the USB bus are wanted devices.
+            //
+            // Save the passed in RemainingDevicePath this time
+            //
+            if let Some(mut remaining_device_path) = remaining_device_path {
+                let device_path_node = remaining_device_path.next().ok_or(ProtocolError::InvalidParameter)?;
+                let device_path_header = device_path_node.header();
+                if device_path_header.r#type == device_path_temp::TYPE_END
+                    && device_path_header.sub_type == device_path_temp::END_ENTIRE_DEVICE_PATH_SUBTYPE
+                {
+                    return Ok(());
+                }
+            }
+
+            // implement UsbBusAddWantedUsbIoDP
+
+            // implement UsbBusRecursivelyConnectWantedUsbIo
+
+            // Wanted-device-path storage and recursive child connection are not
+            // implemented in the current Rust bus model yet.
+            log::debug!("USB Bus: existing bus requires child connection handling");
+            return Ok(());
+        }
+
+        usb_bus_build_protocol(self.protocols, agent, controller, remaining_device_path)?;
+
+        Ok(())
+    }
+
+    /// Stops USB Bus support for the given controller.
+    fn stop(
+        &self,
+        agent: Handle,
+        controller: Handle,
+        children: &[Handle],
+    ) -> core::result::Result<(), ProtocolError> {
+        log::trace!("USB Bus: driver_binding_stop on controller {:?}", controller);
+
+        Ok(())
+    }
 }
 
 /// USB bus Patina component.
 ///
 /// When dispatched, installs a UEFI Driver Binding that produces the UsbIo protocol.
+#[derive(Default)]
 pub struct UsbBusComponent;
 
 #[component]
 impl UsbBusComponent {
-    fn entry_point(self, boot_services: StandardBootServices, image_handle: params::Handle) -> Result<()> {
-        let boot_services: &'static StandardBootServices = Box::leak(Box::new(boot_services));
-        install_usb_bus_driver_binding(boot_services, *image_handle)
+    /// Creates a new instance of the component.
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn entry_point(self, protocols: Service<dyn ProtocolServices>) -> Result<()> {
+        let agent = protocols.install_driver_binding(UsbBusDriver { protocols })?;
+        Ok(())
     }
 }
 
-/// Installs the USB bus driver binding using the provided boot services.
-fn install_usb_bus_driver_binding<T: BootServices + Clone + 'static>(
-    boot_services: &'static T,
-    image_handle: efi::Handle,
-) -> Result<()> {
-    let (driver_binding_handle, _marker_key) =
-        boot_services.install_protocol_interface(None, Box::new(UsbBusMarker))?;
+/// Installs the USB bus driver binding using the provided protocol services.
+fn usb_bus_build_protocol(
+    protocols: Service<dyn ProtocolServices>,
+    agent: Handle,
+    controller: Handle,
+    remaining_device_path: Option<DevicePathWalker>,
+) -> core::result::Result<(), ProtocolError> {
+    let _ = (protocols, agent, controller, remaining_device_path);
+/*
+    let device_path = unsafe {
+        boot_services.open_protocol::<EfiDevicePathProtocol>(
+            controller,
+            agent,
+            controller,
+            efi::OPEN_PROTOCOL_BY_DRIVER,
+        )?
+    };
 
-    let driver = driver::UsbBusDriver::new(driver_binding_handle);
+    let usb2_hc = match unsafe {
+        boot_services.open_protocol::<Usb2HcProtocol>(controller, agent, controller, efi::OPEN_PROTOCOL_BY_DRIVER)
+    } {
+        Ok(usb2_hc) => usb2_hc,
+        Err(status) => {
+            boot_services.close_protocol(controller, &device_path::PROTOCOL_GUID, agent, controller).ok();
+            return Err(status);
+        }
+    };
 
-    let mut driver_binding =
-        UefiDriverBinding::new_with_driver_handle(driver, image_handle, driver_binding_handle, boot_services);
+    let mut bus = Box::new(UsbBus {
+        signature: USB_BUS_SIGNATURE as usize,
+        bus_id: EfiUsbBusProtocol { reserved: 0 },
+        host_handle: controller,
+        device_path: device_path as *mut _,
+        usb2_hc: usb2_hc as *mut Usb2HcProtocol as *mut _,
+        max_devices: USB_MAX_DEVICES as u32,
+        devices: [ptr::null_mut(); 256],
+        wanted_usb_io_dp_list: list_entry::Entry { forward_link: ptr::null_mut(), back_link: ptr::null_mut() },
+    });
 
-    driver_binding.install().map_err(patina::error::EfiError::from)?;
+    if usb2_hc.major_revision == 0x3 {
+        bus.max_devices = 256;
+    }
 
+    let mut root_hub = Box::new(UsbDevice {
+        bus: ptr::null_mut(),
+        speed: 0,
+        address: 0,
+        max_packet0: 0,
+        dev_desc: ptr::null_mut(),
+        active_config: ptr::null_mut(),
+        lang_id: [0; 16],
+        total_lang_id: 0,
+        num_of_interface: 1,
+        interfaces: [ptr::null_mut(); 16],
+        translator: ptr::null_mut(),
+        parent_addr: 0,
+        parent_if: ptr::null_mut(),
+        parent_port: 0,
+        tier: 0,
+        connected: false.into(),
+        disconnect_fail: false.into(),
+    });
+    let root_if = Box::new(MaybeUninit::<UsbInterface>::uninit());
+
+    let bus_ptr = &mut *bus as *mut UsbBus;
+    let root_hub_ptr = &mut *root_hub as *mut UsbDevice;
+    let root_if_ptr = root_if.as_ptr() as *mut UsbInterface;
+    let list_head = &mut bus.wanted_usb_io_dp_list as *mut list_entry::Entry;
+    bus.wanted_usb_io_dp_list.forward_link = list_head;
+    bus.wanted_usb_io_dp_list.back_link = list_head;
+    root_hub.bus = bus_ptr;
+    root_hub.interfaces[0] = root_if_ptr;
+    unsafe {
+        ptr::addr_of_mut!((*root_if_ptr).signature).write(USB_INTERFACE_SIGNATURE as usize);
+        ptr::addr_of_mut!((*root_if_ptr).device).write(root_hub_ptr);
+        ptr::addr_of_mut!((*root_if_ptr).device_path).write(device_path as *mut _);
+    }
+    bus.devices[0] = root_hub_ptr;
+
+    if let Err(status) =
+        boot_services.install_protocol_interface(Some(controller), Box::new(EfiUsbBusProtocol { reserved: 0 }))
+    {
+        boot_services.close_protocol(controller, &usb_2_host_controller::PROTOCOL_GUID, agent, controller).ok();
+        boot_services.close_protocol(controller, &device_path::PROTOCOL_GUID, agent, controller).ok();
+        return Err(status);
+    }
+
+    Box::leak(bus);
+    Box::leak(root_hub);
+    Box::leak(root_if);
+*/
     Ok(())
-}
-
-#[cfg(test)]
-mod test {
-    use patina::boot_services::{MockBootServices, c_ptr::CPtr};
-
-    use super::*;
-
-    #[test]
-    fn install_usb_bus_binding_should_install_a_binding() {
-        let boot_services = Box::leak(Box::new(MockBootServices::new()));
-
-        boot_services.expect_install_protocol_interface::<UsbBusMarker, Box<UsbBusMarker>>().returning(
-            |handle, protocol_interface| {
-                assert_eq!(handle, None, "Expected no handle for marker protocol installation");
-                Ok((0x5678 as efi::Handle, protocol_interface.metadata()))
-            },
-        );
-
-        boot_services.expect_install_protocol_interface_unchecked().returning(|handle, protocol, interface| {
-            if protocol == &efi::protocols::driver_binding::PROTOCOL_GUID {
-                assert!(
-                    handle.is_some_and(|handle| handle as usize == 0x5678),
-                    "Expected correct handle for driver binding protocol"
-                );
-                assert!(!interface.is_null(), "Expected non-null interface for driver binding protocol");
-                return Ok(0x9abc as efi::Handle);
-            }
-            panic!("Unexpected protocol installation: {:?}", protocol);
-        });
-
-        let mock_image_handle = 0x1234 as efi::Handle;
-        install_usb_bus_driver_binding(boot_services, mock_image_handle).expect("install should succeed");
-    }
-
-    #[test]
-    fn install_usb_bus_binding_handles_marker_failure() {
-        let boot_services = Box::leak(Box::new(MockBootServices::new()));
-
-        boot_services
-            .expect_install_protocol_interface::<UsbBusMarker, Box<UsbBusMarker>>()
-            .returning(|_, _| Err(efi::Status::OUT_OF_RESOURCES));
-
-        let mock_image_handle = 0x1234 as efi::Handle;
-        assert_eq!(
-            install_usb_bus_driver_binding(boot_services, mock_image_handle),
-            Err(efi::Status::OUT_OF_RESOURCES.into())
-        );
-    }
 }

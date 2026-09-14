@@ -47,7 +47,7 @@ pub const USB_PORT_STAT_C_SUSPEND: u16 = 0x0004;
 pub const USB_PORT_STAT_C_OVERCURRENT: u16 = 0x0008;
 pub const USB_PORT_STAT_C_RESET: u16 = 0x0010;
 
-#[repr(u32)]
+#[repr(u16)]
 pub enum UsbPortFeature {
     Enable = 1,
     Suspend = 2,
