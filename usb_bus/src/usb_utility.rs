@@ -14,6 +14,13 @@ use core::{ffi::c_void, mem, ptr};
 #[path = "../../protocols/device_path_temp.rs"]
 mod device_path_temp;
 
+use patina::{
+    component::service::uefi_services::{
+        handle::Handle,
+        protocol::{OpenAttributes, ProtocolError, ProtocolServices},
+    },
+    protocol::ProtocolInterface,
+};
 use patina::uefi::boot_services::BootServices;
 use r_efi::{base::Boolean, efi};
 
@@ -24,6 +31,7 @@ use crate::usb_2_host_controller::{
 use crate::usb_bus_defs::{USB_INTERFACE_SIGNATURE, UsbBus, UsbInterface};
 
 pub type Result<T = ()> = core::result::Result<T, efi::Status>;
+pub type ProtocolResult<T = ()> = core::result::Result<T, ProtocolError>;
 
 fn host_controller(bus: *mut UsbBus) -> *mut Usb2HcProtocol {
     // SAFETY: Callers must provide a valid UsbBus allocated by the bus driver.
@@ -202,32 +210,55 @@ pub unsafe fn usb_hc_sync_interrupt_transfer(
 }
 
 /// Opens the host-controller protocol for a child controller.
-pub unsafe fn usb_open_host_proto_by_child<U: BootServices + 'static>(
-    boot_services: &'static U,
+pub fn usb_open_host_proto_by_child(
+    protocols: &dyn ProtocolServices,
     bus: *mut UsbBus,
     agent: efi::Handle,
     child: efi::Handle,
-) -> Result {
-    // SAFETY: The bus pointer is valid for the lifetime of the binding.
+) -> ProtocolResult {
     let host_handle = unsafe { (*bus).host_handle };
-    // SAFETY: Protocol ownership and handles are controlled by Boot Services.
-    unsafe {
-        boot_services
-            .open_protocol::<Usb2HcProtocol>(host_handle, agent, child, efi::OPEN_PROTOCOL_BY_CHILD_CONTROLLER)
-            .map(|_| ())
-    }
+    let Some(host_handle) = Handle::from_raw(host_handle) else {
+        return Err(ProtocolError::InvalidParameter);
+    };
+    let Some(agent) = Handle::from_raw(agent) else {
+        return Err(ProtocolError::InvalidParameter);
+    };
+    let Some(child) = Handle::from_raw(child) else {
+        return Err(ProtocolError::InvalidParameter);
+    };
+    protocols
+        .open_interface(
+            host_handle,
+            Usb2HcProtocol::PROTOCOL_GUID,
+            agent,
+            OpenAttributes::ByChildController { controller: child },
+        )
+        .map(|_| ())
 }
 
 /// Closes a host-controller protocol opened for a child controller.
-pub fn usb_close_host_proto_by_child<U: BootServices>(
-    boot_services: &U,
+pub fn usb_close_host_proto_by_child(
+    protocols: &dyn ProtocolServices,
     bus: *mut UsbBus,
     agent: efi::Handle,
     child: efi::Handle,
-) -> Result {
-    // SAFETY: The bus pointer is valid for the lifetime of the binding.
+) -> ProtocolResult {
     let host_handle = unsafe { (*bus).host_handle };
-    boot_services.close_protocol(host_handle, &crate::usb_2_host_controller::PROTOCOL_GUID, agent, child)
+    let Some(host_handle) = Handle::from_raw(host_handle) else {
+        return Err(ProtocolError::InvalidParameter);
+    };
+    let Some(agent) = Handle::from_raw(agent) else {
+        return Err(ProtocolError::InvalidParameter);
+    };
+    let Some(child) = Handle::from_raw(child) else {
+        return Err(ProtocolError::InvalidParameter);
+    };
+    protocols.close_interface(
+        host_handle,
+        Usb2HcProtocol::PROTOCOL_GUID,
+        agent,
+        Some(child),
+    )
 }
 
 /// Returns the current task priority level.
