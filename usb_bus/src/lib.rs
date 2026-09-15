@@ -28,27 +28,24 @@ pub(crate) mod usb_utility;
 //#[cfg(test)]
 //pub(crate) mod test_stubs;
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use core::mem::MaybeUninit;
 use core::ptr;
 use r_efi::efi;
 
 use patina::{
-    BinaryGuid,
     component::{
         component,
         service::{
             Service,
             uefi_services::{
-                driver_model::driver_binding::DriverBinding,
+                driver_model::{driver::DriverServices, driver_binding::DriverBinding},
                 protocol::{Handle, OpenAttributes, ProtocolError, ProtocolPtr, ProtocolServices, ProtocolServicesExt},
-            }, 
+            },
         },
-        params
     },
     error::{Result, EfiError},
     pi::{
-        list_entry,
         protocol::status_code,
         status_code::{EFI_IO_BUS_USB, EFI_IOB_PC_INIT, EFI_PROGRESS_CODE},
     },
@@ -58,11 +55,14 @@ use patina::{
 
 use crate::usb_2_host_controller::Protocol as Usb2HcProtocol;
 use crate::usb_bus_defs::{
-    EfiUsbBusProtocol, USB_BUS_SIGNATURE, USB_INTERFACE_SIGNATURE, USB_MAX_DEVICES, UsbBus, UsbDevice, UsbInterface,
+    EfiUsbBusProtocol, USB_BUS_SIGNATURE, USB_INTERFACE_SIGNATURE, USB_MAX_DEVICES, UsbBus, UsbDevice,
+    UsbDevicePathList, UsbInterface,
 };
+use crate::usb_utility::{usb_bus_add_wanted_usb_io_dp, usb_bus_recursively_connect_wanted_usb_io};
 
 pub struct UsbBusDriver {
     protocols: Service<dyn ProtocolServices>,
+    drivers: Service<dyn DriverServices>,
 }
 
 impl DriverBinding for UsbBusDriver {
@@ -169,23 +169,43 @@ impl DriverBinding for UsbBusDriver {
             //
             // Save the passed in RemainingDevicePath this time
             //
-            if let Some(mut remaining_device_path) = remaining_device_path {
-                let device_path_node = remaining_device_path.next().ok_or(ProtocolError::InvalidParameter)?;
-                let device_path_header = device_path_node.header();
-                if device_path_header.r#type == device_path_temp::TYPE_END
-                    && device_path_header.sub_type == device_path_temp::END_ENTIRE_DEVICE_PATH_SUBTYPE
-                {
-                    return Ok(());
+            let remaining_device_path = match remaining_device_path {
+                None => None,
+                Some(remaining_device_path) => {
+                    let mut path = Vec::new();
+                    for node in remaining_device_path {
+                        let header = node.header();
+                        if path.is_empty()
+                            && header.r#type == device_path_temp::TYPE_END
+                            && header.sub_type == device_path_temp::END_ENTIRE_DEVICE_PATH_SUBTYPE
+                        {
+                            return Ok(());
+                        }
+                        path.push(header.r#type);
+                        path.push(header.sub_type);
+                        path.extend_from_slice(&header.length);
+                        path.extend_from_slice(node.data());
+                    }
+                    if path.is_empty() {
+                        return Err(ProtocolError::InvalidParameter);
+                    }
+                    Some(path)
                 }
-            }
+            };
 
-            // implement UsbBusAddWantedUsbIoDP
-
-            // implement UsbBusRecursivelyConnectWantedUsbIo
-
-            // Wanted-device-path storage and recursive child connection are not
-            // implemented in the current Rust bus model yet.
-            log::debug!("USB Bus: existing bus requires child connection handling");
+            let bus_id = self.protocols.interface_on_handle(controller, EfiUsbBusProtocol::PROTOCOL_GUID)?;
+            // SAFETY: This private protocol was installed as the `bus_id` field of the bus owned
+            // by this driver, and DriverBinding::start serializes updates to its policy.
+            let bus_id = unsafe { &mut *bus_id.as_raw().cast::<EfiUsbBusProtocol>() };
+            let remaining_device_path = remaining_device_path.as_ref().map(|path| {
+                // SAFETY: The bytes were copied from a validated DevicePathWalker and remain alive
+                // for the duration of the helper call. Device path headers have byte alignment.
+                unsafe { &*path.as_ptr().cast::<device_path_temp::EfiDevicePathProtocol>() }
+            });
+            // SAFETY: The remaining path is complete and valid, and `bus_id` exclusively refers to
+            // the private bus interface for this serialized start operation.
+            unsafe { usb_bus_add_wanted_usb_io_dp(bus_id, remaining_device_path) }?;
+            usb_bus_recursively_connect_wanted_usb_io(*self.protocols, *self.drivers, bus_id)?;
             return Ok(());
         }
 
@@ -197,9 +217,9 @@ impl DriverBinding for UsbBusDriver {
     /// Stops USB Bus support for the given controller.
     fn stop(
         &self,
-        agent: Handle,
+        _agent: Handle,
         controller: Handle,
-        children: &[Handle],
+        _children: &[Handle],
     ) -> core::result::Result<(), ProtocolError> {
         log::trace!("USB Bus: driver_binding_stop on controller {:?}", controller);
 
@@ -220,8 +240,8 @@ impl UsbBusComponent {
         Self
     }
 
-    fn entry_point(self, protocols: Service<dyn ProtocolServices>) -> Result<()> {
-        let agent = protocols.install_driver_binding(UsbBusDriver { protocols })?;
+    fn entry_point(self, protocols: Service<dyn ProtocolServices>, drivers: Service<dyn DriverServices>) -> Result<()> {
+        let _agent = protocols.install_driver_binding(UsbBusDriver { protocols, drivers })?;
         Ok(())
     }
 }
@@ -268,7 +288,7 @@ fn usb_bus_build_protocol(
         usb2_hc: usb2_hc_ptr,
         max_devices: USB_MAX_DEVICES as u32,
         devices: [ptr::null_mut(); 256],
-        wanted_usb_io_dp_list: list_entry::Entry { forward_link: ptr::null_mut(), back_link: ptr::null_mut() },
+        wanted_usb_io_dp_list: UsbDevicePathList::default(),
     });
 
     // SAFETY: `usb2_hc_ptr` came from the interface registered for `Usb2HcProtocol` and
@@ -301,9 +321,6 @@ fn usb_bus_build_protocol(
     let bus_ptr = &mut *bus as *mut UsbBus;
     let root_hub_ptr = &mut *root_hub as *mut UsbDevice;
     let root_if_ptr = root_if.as_mut_ptr();
-    let list_head = &mut bus.wanted_usb_io_dp_list as *mut list_entry::Entry;
-    bus.wanted_usb_io_dp_list.forward_link = list_head;
-    bus.wanted_usb_io_dp_list.back_link = list_head;
     root_hub.bus = bus_ptr;
     root_hub.interfaces[0] = root_if_ptr;
     unsafe {

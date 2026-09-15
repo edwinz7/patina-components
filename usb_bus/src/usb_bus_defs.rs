@@ -6,10 +6,10 @@
 
 #![allow(dead_code)]
 
-use core::ffi::c_void;
+use core::{cell::Cell, ffi::c_void, mem::offset_of, ptr};
+use alloc::vec::{IntoIter, Vec};
 use patina::{
     BinaryGuid,
-    pi::list_entry,
     //component::service::uefi_services::{
     //    protocol::ProtocolServices,
     //    tpl::{Tpl, TplServices, TplServicesExt},
@@ -18,7 +18,6 @@ use patina::{
     protocol::ProtocolInterface,
 };
 use r_efi::{
-    base::Boolean,
     efi,
     efi::protocols::{device_path::Protocol as DevicePathProtocol, usb_io::Protocol as UsbIoProtocol},
 };
@@ -146,6 +145,49 @@ pub const fn usb_bit_is_set(data: usize, bit: usize) -> bool {
     data & bit == bit
 }
 
+/// Returns the USB interface containing the supplied USB I/O protocol.
+///
+/// # Safety
+///
+/// `usb_io` must reference the `usb_io` field of a live `UsbInterface`.
+pub unsafe fn usb_interface_from_usb_io(usb_io: &UsbIoProtocol) -> Option<&UsbInterface> {
+    let interface = unsafe { ptr::from_ref(usb_io).byte_sub(offset_of!(UsbInterface, usb_io)) }
+        .cast::<UsbInterface>();
+    if unsafe { (*interface).signature } != USB_INTERFACE_SIGNATURE as usize {
+        return None;
+    }
+
+    Some(unsafe { &*interface })
+}
+
+/// Returns the USB bus containing the supplied private bus protocol.
+///
+/// # Safety
+///
+/// `bus_id` must reference the `bus_id` field of a live `UsbBus`.
+pub unsafe fn usb_bus_from_this(bus_id: &EfiUsbBusProtocol) -> Option<&UsbBus> {
+    let bus = unsafe { ptr::from_ref(bus_id).byte_sub(offset_of!(UsbBus, bus_id)) }.cast::<UsbBus>();
+    if unsafe { (*bus).signature } != USB_BUS_SIGNATURE as usize {
+        return None;
+    }
+
+    Some(unsafe { &*bus })
+}
+
+/// Returns the mutable USB bus containing the supplied private bus protocol.
+///
+/// # Safety
+///
+/// `bus_id` must reference the `bus_id` field of a live, exclusively borrowed `UsbBus`.
+pub unsafe fn usb_bus_from_this_mut(bus_id: &mut EfiUsbBusProtocol) -> Option<&mut UsbBus> {
+    let bus = unsafe { ptr::from_mut(bus_id).byte_sub(offset_of!(UsbBus, bus_id)) }.cast::<UsbBus>();
+    if unsafe { (*bus).signature } != USB_BUS_SIGNATURE as usize {
+        return None;
+    }
+
+    Some(unsafe { &mut *bus })
+}
+
 //
 // Used to locate USB_BUS
 // UsbBusProtocol is the private protocol.
@@ -191,8 +233,8 @@ pub struct UsbDevice {
     pub parent_if: *mut UsbInterface,
     pub parent_port: u8,
     pub tier: u8,
-    pub connected: Boolean,
-    pub disconnect_fail: Boolean,
+    pub connected: bool,
+    pub disconnect_fail: bool,
 }
 
 //
@@ -209,10 +251,10 @@ pub struct UsbInterface {
     pub handle: efi::Handle,
     pub usb_io: UsbIoProtocol,
     pub device_path: *mut DevicePathProtocol,
-    pub is_managed: Boolean,
+    pub is_managed: Cell<bool>,
 
     // Hub device special data
-    pub is_hub: Boolean,
+    pub is_hub: bool,
     pub hub_api: *mut UsbHubApi,
     pub num_of_port: u8,
     pub hub_notify: efi::Event,
@@ -262,7 +304,7 @@ pub struct UsbBus {
     // WantedUsbIoDPList tracks the Usb child devices which user want to recursively fully connecte,
     // every wanted child device is stored in a item of the WantedUsbIoDPList, whose structure is
     // DEVICE_PATH_LIST_ITEM
-    pub wanted_usb_io_dp_list: list_entry::Entry,
+    pub wanted_usb_io_dp_list: UsbDevicePathList,
 }
 
 //
@@ -286,7 +328,7 @@ pub const DEVICE_PATH_LIST_ITEM_SIGNATURE: u64 = signature(b"dpli");
 #[repr(C)]
 pub struct DevicePathListItem {
     pub signature: usize,
-    pub link: *mut c_void,
+    pub link: UsbDevicePathList,
     pub device_path: *mut DevicePathProtocol,
 }
 
@@ -294,4 +336,111 @@ pub struct DevicePathListItem {
 pub struct UsbClassFormatDevicePath {
     pub usb_class: [u8; 32],
     pub end: DevicePathProtocol,
+}
+
+#[derive(Default)]
+pub struct UsbDevicePathList {
+    paths: Vec<Vec<u8>>,
+}
+
+impl UsbDevicePathList {
+    pub fn iter(&self) -> UsbDevicePathIter<'_> {
+        UsbDevicePathIter { inner: self.paths.iter() }
+    }
+
+    pub fn initialize_list_head(&mut self) {
+        self.paths.clear();
+    }
+
+    pub fn insert_tail_list(&mut self, entry: Vec<u8>) {
+        self.paths.push(entry);
+    }
+
+    pub fn remove_entry_list(&mut self, entry: &[u8]) -> bool {
+        let Some(index) = self.paths.iter().position(|path| path == entry) else {
+            return false;
+        };
+
+        self.paths.remove(index);
+        true
+    }
+
+    pub fn contains(&self, entry: &[u8]) -> bool {
+        self.paths.iter().any(|path| path == entry)
+    }
+}
+
+pub struct UsbDevicePathIter<'a> {
+    inner: core::slice::Iter<'a, Vec<u8>>,
+}
+
+impl<'a> Iterator for UsbDevicePathIter<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(Vec::as_slice)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for UsbDevicePathIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(Vec::as_slice)
+    }
+}
+
+impl ExactSizeIterator for UsbDevicePathIter<'_> {}
+impl core::iter::FusedIterator for UsbDevicePathIter<'_> {}
+
+impl<'a> IntoIterator for &'a UsbDevicePathList {
+    type Item = &'a [u8];
+    type IntoIter = UsbDevicePathIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl IntoIterator for UsbDevicePathList {
+    type Item = Vec<u8>;
+    type IntoIter = IntoIter<Vec<u8>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.paths.into_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UsbDevicePathList;
+
+    #[test]
+    fn device_path_list_operations_preserve_list_semantics() {
+        let mut list = UsbDevicePathList::default();
+        list.insert_tail_list(vec![1]);
+        list.insert_tail_list(vec![2]);
+
+        assert_eq!(list.iter().collect::<Vec<_>>(), [vec![1], vec![2]]);
+        assert_eq!(list.paths, [vec![1], vec![2]]);
+        assert!(list.remove_entry_list(&[1]));
+        assert_eq!(list.paths, [vec![2]]);
+        assert!(!list.remove_entry_list(&[3]));
+
+        list.initialize_list_head();
+        assert!(list.paths.is_empty());
+    }
+
+    #[test]
+    fn device_path_list_supports_borrowed_and_owned_iteration() {
+        let mut list = UsbDevicePathList::default();
+        list.insert_tail_list(vec![1]);
+        list.insert_tail_list(vec![2]);
+
+        let borrowed = (&list).into_iter().collect::<Vec<_>>();
+        assert_eq!(borrowed, [vec![1], vec![2]]);
+        assert_eq!(list.into_iter().collect::<Vec<_>>(), [vec![1], vec![2]]);
+    }
 }

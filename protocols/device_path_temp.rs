@@ -45,7 +45,7 @@ pub struct Protocol {
     pub sub_type: u8,
     pub length: [u8; 2],
 }
-pub type EfiDevicePath = Protocol;
+pub type EfiDevicePathProtocol = Protocol;
 
 macro_rules! packed_struct {
     ($(#[$meta:meta])* $vis:vis struct $name:ident { $($field:vis $field_name:ident : $field_type:ty),* $(,)? }) => {

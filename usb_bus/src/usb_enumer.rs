@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{ffi::c_void, ptr};
+use core::{cell::Cell, ffi::c_void, ptr};
 use r_efi::efi;
 
 use crate::usb_2_host_controller::{UsbPortFeature, UsbPortStatus};
@@ -94,8 +94,8 @@ pub fn usb_create_interface(device: &mut UsbDevice, descriptor: &mut UsbInterfac
         handle: ptr::null_mut(),
         usb_io: new_usb_io_protocol(),
         device_path: ptr::null_mut(),
-        is_managed: false.into(),
-        is_hub: false.into(),
+        is_managed: Cell::new(false),
+        is_hub: false,
         hub_api: ptr::null_mut(),
         num_of_port: 0,
         hub_notify: ptr::null_mut(),

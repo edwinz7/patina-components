@@ -265,7 +265,7 @@ pub fn usb_parse_config_desc(bytes: &[u8]) -> Option<Box<UsbConfigDesc>> {
 
 /// Executes a USB control request for a device.
 pub unsafe fn usb_ctrl_request(
-    usb_dev: &mut UsbDevice,
+    usb_dev: &UsbDevice,
     direction: UsbDataDirection,
     request_type: usize,
     target: usize,
@@ -309,7 +309,7 @@ pub unsafe fn usb_ctrl_request(
 
 /// Retrieves a standard USB descriptor into the caller-provided buffer.
 pub unsafe fn usb_ctrl_get_desc(
-    usb_dev: &mut UsbDevice,
+    usb_dev: &UsbDevice,
     descriptor_type: usize,
     descriptor_index: usize,
     language_id: u16,
@@ -380,7 +380,7 @@ pub unsafe fn usb_get_dev_desc(usb_dev: &mut UsbDevice) -> Status {
 }
 
 /// Retrieves a string descriptor as UTF-16 code units.
-pub unsafe fn usb_get_one_string(usb_dev: &mut UsbDevice, index: u8, language_id: u16) -> Option<Vec<u16>> {
+pub unsafe fn usb_get_one_string(usb_dev: &UsbDevice, index: u8, language_id: u16) -> Option<Vec<u16>> {
     let mut header = [0u8; 2];
     let status = unsafe {
         usb_ctrl_get_desc(
