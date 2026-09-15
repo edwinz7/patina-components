@@ -41,7 +41,7 @@ pub type Result<T = ()> = core::result::Result<T, efi::Status>;
 pub type ProtocolResult<T = ()> = core::result::Result<T, ProtocolError>;
 
 #[repr(transparent)]
-struct UsbIoProtocol(efi::protocols::usb_io::Protocol);
+pub(crate) struct UsbIoProtocol(pub(crate) efi::protocols::usb_io::Protocol);
 
 // SAFETY: This transparent wrapper binds the standard USB I/O protocol layout to its UEFI GUID.
 unsafe impl ProtocolInterface for UsbIoProtocol {

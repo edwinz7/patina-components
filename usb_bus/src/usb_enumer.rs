@@ -231,23 +231,42 @@ pub unsafe fn usb_find_child(hub_interface: &UsbInterface, port: u8) -> Option<&
 }
 
 /// Removes a device and its descendants from the bus.
-pub unsafe fn usb_remove_device(device: &mut UsbDevice) -> efi::Status {
-    let Some(bus) = (unsafe { device.bus.as_mut() }) else { return efi::Status::INVALID_PARAMETER };
-    let max_devices = (bus.max_devices as usize).min(bus.devices.len());
+pub unsafe fn usb_remove_device(device: *mut UsbDevice) -> efi::Status {
+    let Some(device) = (unsafe { device.as_mut() }) else { return efi::Status::INVALID_PARAMETER };
+    let bus = device.bus;
+    if bus.is_null() {
+        return efi::Status::INVALID_PARAMETER;
+    }
+    let max_devices = unsafe { ((*bus).max_devices as usize).min((*bus).devices.len()) };
+    let mut result = efi::Status::SUCCESS;
     for index in 1..max_devices {
-        let child = bus.devices[index];
+        let child = unsafe { (*bus).devices[index] };
         if child.is_null() || unsafe { (*child).parent_addr } != device.address {
             continue;
         }
-        let status = unsafe { usb_remove_device(&mut *child) };
-        if status == efi::Status::SUCCESS {
-            bus.devices[index] = ptr::null_mut();
-        } else {
-            return status;
+        let status = unsafe { usb_remove_device(child) };
+        if status != efi::Status::SUCCESS {
+            unsafe { (*child).disconnect_fail = true.into() };
+            result = status;
         }
     }
+    if result != efi::Status::SUCCESS {
+        return result;
+    }
+
     device.connected = false.into();
-    unsafe { usb_remove_config(device) }
+    let status = unsafe { usb_remove_config(device) };
+    if status == efi::Status::SUCCESS {
+        let address = device.address as usize;
+        if address >= max_devices || unsafe { (*bus).devices[address] != device } {
+            return efi::Status::INVALID_PARAMETER;
+        }
+        unsafe { (*bus).devices[address] = ptr::null_mut() };
+        drop(unsafe { Box::from_raw(device) });
+    } else {
+        device.disconnect_fail = true.into();
+    }
+    status
 }
 
 /// Enumerates a newly connected device. Hub protocol integration is pending.

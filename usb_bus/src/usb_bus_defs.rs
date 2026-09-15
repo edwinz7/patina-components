@@ -160,6 +160,21 @@ pub unsafe fn usb_interface_from_usb_io(usb_io: &UsbIoProtocol) -> Option<&UsbIn
     Some(unsafe { &*interface })
 }
 
+/// Returns the mutable USB interface containing the supplied USB I/O protocol.
+///
+/// # Safety
+///
+/// `usb_io` must exclusively reference the `usb_io` field of a live `UsbInterface`.
+pub unsafe fn usb_interface_from_usb_io_mut(usb_io: &mut UsbIoProtocol) -> Option<&mut UsbInterface> {
+    let interface = unsafe { ptr::from_mut(usb_io).byte_sub(offset_of!(UsbInterface, usb_io)) }
+        .cast::<UsbInterface>();
+    if unsafe { (*interface).signature } != USB_INTERFACE_SIGNATURE as usize {
+        return None;
+    }
+
+    Some(unsafe { &mut *interface })
+}
+
 /// Returns the USB bus containing the supplied private bus protocol.
 ///
 /// # Safety

@@ -4,11 +4,19 @@
 
 extern crate alloc;
 use alloc::{vec, vec::Vec, boxed::Box};
-use core::{ffi::c_void, mem};
+use core::{ffi::c_void, mem, ptr, time::Duration};
 use r_efi::{efi, efi::protocols::usb_io};
+use patina::{
+    component::service::uefi_services::{
+        event::{Event, EventServices},
+        timer_event::{TimerEventServices, TimerEventServicesExt, TimerType},
+        tpl::Tpl as ServiceTpl,
+    },
+    error::EfiError,
+};
 use patina::uefi::{
     boot_services::{BootServices, tpl::Tpl},
-    event::{EventTimerType, EventType},
+    event::EventType,
 };
 
 use crate::usb_2_host_controller::{
@@ -522,23 +530,24 @@ pub fn usb_hub_release<U: BootServices + 'static>(interface: &mut UsbInterface, 
     efi::Status::SUCCESS
 }
 
-/// Initializes a root hub and configures its periodic Boot Services timer.
-pub unsafe fn usb_root_hub_init<U: BootServices + 'static>(
+/// Initializes a root hub and configures its periodic timer.
+pub unsafe fn usb_root_hub_init(
     interface: &mut UsbInterface,
-    boot_services: &'static U,
-) -> efi::Status {
+    events: &'static dyn EventServices,
+    timers: &'static dyn TimerEventServices,
+) -> core::result::Result<(), EfiError> {
     let Some(device) = (unsafe { interface.device.as_ref() }) else {
-        return efi::Status::INVALID_PARAMETER;
+        return Err(EfiError::InvalidParameter);
     };
     let Some(bus) = (unsafe { device.bus.as_mut() }) else {
-        return efi::Status::INVALID_PARAMETER;
+        return Err(EfiError::InvalidParameter);
     };
     let mut max_speed = 0;
     let mut num_ports = 0;
     let mut support_64 = 0;
     let status = unsafe { usb_hc_get_capability(bus, &mut max_speed, &mut num_ports, &mut support_64) };
     if status != efi::Status::SUCCESS {
-        return status;
+        return Err(EfiError::from(status));
     }
 
     // The original MU_BASECORE implementation initializes the root-hub interface
@@ -551,41 +560,37 @@ pub unsafe fn usb_root_hub_init<U: BootServices + 'static>(
     interface.num_of_port = num_ports;
     interface.poll_count = 0;
 
-    let event = match boot_services.create_event(
-        EventType::TIMER | EventType::NOTIFY_SIGNAL,
-        Tpl::CALLBACK,
-        Some(usb_root_hub_enumeration),
-        interface as *mut UsbInterface as *mut c_void,
-    ) {
+    let interface_ptr = interface as *mut UsbInterface as usize;
+    let event = match timers.on_timer_event(ServiceTpl::Callback, move || unsafe {
+        usb_root_hub_enumeration(ptr::null_mut(), interface_ptr as *mut c_void)
+    }) {
         Ok(event) => event,
-        Err(status) => return status,
+        Err(error) => return Err(EfiError::from(error)),
     };
-    interface.hub_notify = event;
+    interface.hub_notify = event.as_raw();
 
-    if let Err(status) = boot_services.signal_event(event) {
-        let _ = boot_services.close_event(event);
+    if let Err(error) = events.signal_event(event) {
+        let _ = events.close_event(event);
         interface.hub_notify = core::ptr::null_mut();
         interface.is_hub = false.into();
-        return status;
+        return Err(EfiError::from(error));
     }
 
-    if let Err(status) = boot_services.set_timer(
+    if let Err(error) = timers.set_timer(
         event,
-        EventTimerType::Periodic,
-        USB_ROOTHUB_POLL_INTERVAL,
+        TimerType::Periodic(Duration::from_nanos(USB_ROOTHUB_POLL_INTERVAL * 100)),
     ) {
-        let _ = boot_services.close_event(event);
+        let _ = events.close_event(event);
         interface.hub_notify = core::ptr::null_mut();
         interface.is_hub = false.into();
-        return status;
+        return Err(EfiError::from(error));
     }
 
-    // Wait for timer callbacks to record the minimum number of root-hub polls.
     while interface.poll_count < USB_ENUM_POLL_MINIMUM_ATTEMPTS {
-        let _ = boot_services.stall(USB_ROOTHUB_POLL_INTERVAL as usize);
+        core::hint::spin_loop();
     }
 
-    efi::Status::SUCCESS
+    Ok(())
 }
 
 /// Reads a root-hub port status through the host-controller protocol.
@@ -678,21 +683,19 @@ pub unsafe fn usb_root_hub_reset_port<U: BootServices>(interface: &mut UsbInterf
     efi::Status::SUCCESS
 }
 
-/// Releases root-hub state and closes its Boot Services timer event.
-pub fn usb_root_hub_release<U: BootServices>(
+/// Releases root-hub state and closes its timer event.
+pub fn usb_root_hub_release(
     interface: &mut UsbInterface,
-    boot_services: &U,
-) -> efi::Status {
+    events: &dyn EventServices,
+    timers: &dyn TimerEventServices,
+) -> core::result::Result<(), EfiError> {
     if !interface.hub_notify.is_null() {
-        if let Err(status) = boot_services.set_timer(interface.hub_notify, EventTimerType::Cancel, 0) {
-            return status;
-        }
-        if let Err(status) = boot_services.close_event(interface.hub_notify) {
-            return status;
-        }
+        let event = Event::from_raw(interface.hub_notify).ok_or(EfiError::InvalidParameter)?;
+        timers.set_timer(event, TimerType::Cancel).map_err(EfiError::from)?;
+        events.close_event(event).map_err(EfiError::from)?;
     }
     interface.is_hub = false.into();
     interface.hub_api = core::ptr::null_mut();
     interface.hub_notify = core::ptr::null_mut();
-    efi::Status::SUCCESS
+    Ok(())
 }
