@@ -23,7 +23,7 @@ use patina::{
 use r_efi::{base::Boolean, efi};
 
 use crate::usb_2_host_controller::{
-    AsyncUsbTransferCallback, Protocol as Usb2HcProtocol, Usb2HcTransactionTranslator, UsbDataDirection,
+    AsyncUsbTransferCallback, Usb2HcProtocol, Usb2HcTransactionTranslator, UsbDataDirection,
     UsbDeviceRequest, UsbPortFeature,
 };
 use crate::device_path_temp::{

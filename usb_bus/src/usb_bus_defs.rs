@@ -26,7 +26,7 @@ use r_efi::{
     efi::protocols::{device_path::Protocol as DevicePathProtocol, usb_io::Protocol as UsbIoProtocol},
 };
 
-use crate::usb_2_host_controller::{Protocol as Usb2HcProtocol, Usb2HcTransactionTranslator};
+use crate::usb_2_host_controller::{Usb2HcProtocol, Usb2HcTransactionTranslator};
 use crate::usb_desc::{UsbConfigDesc, UsbDeviceDesc, UsbEndpointDesc, UsbInterfaceDesc, UsbInterfaceSetting};
 use crate::usb_enumer::{
     UsbHubClearPortChange, UsbHubClearPortFeature, UsbHubGetPortStatus, UsbHubInit, UsbHubRelease, UsbHubResetPort,

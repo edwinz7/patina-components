@@ -14,17 +14,14 @@ use r_efi::base;
 
 // Placeholder to get things building. Need to reconcile this with the
 // below implementation at some point
-unsafe impl ProtocolInterface for Protocol {
-    const PROTOCOL_GUID: BinaryGuid =
-        BinaryGuid::from_fields(0x3e745226, 0x9818, 0x45b6, 0xa2, 0xac, &[0xd7, 0xcd, 0x0e, 0x8b, 0xa2, 0xbc]);
+unsafe impl ProtocolInterface for Usb2HcProtocol {
+    const PROTOCOL_GUID: BinaryGuid = BinaryGuid::from_string("3E745226-9818-45B6-A2AC-D7CD0E8BA2BC");
 }
-
-pub const PROTOCOL_GUID: base::Guid =
-    base::Guid::from_fields(0x3e745226, 0x9818, 0x45b6, 0xa2, 0xac, &[0xd7, 0xcd, 0x0e, 0x8b, 0xa2, 0xbc]);
 
 pub type DataDirection = u32;
 
-#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub struct UsbPortStatus {
     pub port_status: u16,
     pub port_change_status: u16,
@@ -109,16 +106,16 @@ pub enum UsbDataDirection {
 pub type AsyncUsbTransferCallback =
     unsafe extern "efiapi" fn(*mut core::ffi::c_void, usize, *mut core::ffi::c_void, u32) -> base::Status;
 
-pub type ProtocolGetCapability = unsafe extern "efiapi" fn(*mut Protocol, *mut u8, *mut u8, *mut u8) -> base::Status;
+pub type ProtocolGetCapability = unsafe extern "efiapi" fn(*mut Usb2HcProtocol, *mut u8, *mut u8, *mut u8) -> base::Status;
 
-pub type ProtocolReset = unsafe extern "efiapi" fn(*mut Protocol, u16) -> base::Status;
+pub type ProtocolReset = unsafe extern "efiapi" fn(*mut Usb2HcProtocol, u16) -> base::Status;
 
-pub type ProtocolGetState = unsafe extern "efiapi" fn(*mut Protocol, *mut UsbHcState) -> base::Status;
+pub type ProtocolGetState = unsafe extern "efiapi" fn(*mut Usb2HcProtocol, *mut UsbHcState) -> base::Status;
 
-pub type ProtocolSetState = unsafe extern "efiapi" fn(*mut Protocol, UsbHcState) -> base::Status;
+pub type ProtocolSetState = unsafe extern "efiapi" fn(*mut Usb2HcProtocol, UsbHcState) -> base::Status;
 
 pub type ProtocolControlTransfer = unsafe extern "efiapi" fn(
-    *mut Protocol,
+    *mut Usb2HcProtocol,
     u8,
     u8,
     usize,
@@ -132,7 +129,7 @@ pub type ProtocolControlTransfer = unsafe extern "efiapi" fn(
 ) -> base::Status;
 
 pub type ProtocolBulkTransfer = unsafe extern "efiapi" fn(
-    *mut Protocol,
+    *mut Usb2HcProtocol,
     u8,
     u8,
     u8,
@@ -147,7 +144,7 @@ pub type ProtocolBulkTransfer = unsafe extern "efiapi" fn(
 ) -> base::Status;
 
 pub type ProtocolAsyncInterruptTransfer = unsafe extern "efiapi" fn(
-    *mut Protocol,
+    *mut Usb2HcProtocol,
     u8,
     u8,
     u8,
@@ -162,7 +159,7 @@ pub type ProtocolAsyncInterruptTransfer = unsafe extern "efiapi" fn(
 ) -> base::Status;
 
 pub type ProtocolSyncInterruptTransfer = unsafe extern "efiapi" fn(
-    *mut Protocol,
+    *mut Usb2HcProtocol,
     u8,
     u8,
     u8,
@@ -176,7 +173,7 @@ pub type ProtocolSyncInterruptTransfer = unsafe extern "efiapi" fn(
 ) -> base::Status;
 
 pub type ProtocolIsochronousTransfer = unsafe extern "efiapi" fn(
-    *mut Protocol,
+    *mut Usb2HcProtocol,
     u8,
     u8,
     u8,
@@ -189,7 +186,7 @@ pub type ProtocolIsochronousTransfer = unsafe extern "efiapi" fn(
 ) -> base::Status;
 
 pub type ProtocolAsyncIsochronousTransfer = unsafe extern "efiapi" fn(
-    *mut Protocol,
+    *mut Usb2HcProtocol,
     u8,
     u8,
     u8,
@@ -203,14 +200,14 @@ pub type ProtocolAsyncIsochronousTransfer = unsafe extern "efiapi" fn(
 ) -> base::Status;
 
 pub type ProtocolGetRootHubPortStatus =
-    unsafe extern "efiapi" fn(*mut Protocol, u8, *mut UsbPortStatus) -> base::Status;
+    unsafe extern "efiapi" fn(*mut Usb2HcProtocol, u8, *mut UsbPortStatus) -> base::Status;
 
-pub type ProtocolSetRootHubPortFeature = unsafe extern "efiapi" fn(*mut Protocol, u8, UsbPortFeature) -> base::Status;
+pub type ProtocolSetRootHubPortFeature = unsafe extern "efiapi" fn(*mut Usb2HcProtocol, u8, UsbPortFeature) -> base::Status;
 
-pub type ProtocolClearRootHubPortFeature = unsafe extern "efiapi" fn(*mut Protocol, u8, UsbPortFeature) -> base::Status;
+pub type ProtocolClearRootHubPortFeature = unsafe extern "efiapi" fn(*mut Usb2HcProtocol, u8, UsbPortFeature) -> base::Status;
 
 #[repr(C)]
-pub struct Protocol {
+pub struct Usb2HcProtocol {
     pub get_capability: ProtocolGetCapability,
     pub reset: ProtocolReset,
     pub get_state: ProtocolGetState,

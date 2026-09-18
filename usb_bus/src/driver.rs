@@ -43,7 +43,7 @@ use patina::{
 };
 
 use crate::device_path_temp;
-use crate::usb_2_host_controller::Protocol as Usb2HcProtocol;
+use crate::usb_2_host_controller::Usb2HcProtocol;
 use crate::usb_bus_defs::{
     EfiUsbBusProtocol, USB_BUS_SIGNATURE, USB_INTERFACE_SIGNATURE, USB_MAX_DEVICES, UsbBus, UsbDevice,
     UsbDevicePathList, UsbHubServices, UsbInterface, usb_bus_from_this_mut, usb_interface_from_usb_io_mut,
@@ -283,7 +283,7 @@ fn collect_device_path(
 
 impl DriverBinding for UsbBusDriver {
     /// Tests if the given controller has USB IO with HID interface class.
-    #[coverage(off)]
+    #[cfg_attr(coverage, coverage(off))]
     fn supported(
         &self,
         agent: Handle,
@@ -291,7 +291,7 @@ impl DriverBinding for UsbBusDriver {
         remaining_device_path: Option<DevicePathWalker>,
     ) -> core::result::Result<(), ProtocolError> {
         // SAFETY: Usb2HcProtocol layout matches the USB 2.0 Host Controller GUID.
-
+        log::info!("USB Bus component: driver binding supported");
         if let Some(mut remaining_device_path) = remaining_device_path {
             let device_path_node = remaining_device_path.next().ok_or(ProtocolError::InvalidParameter)?;
             let device_path_header = device_path_node.header();
@@ -303,6 +303,7 @@ impl DriverBinding for UsbBusDriver {
                         && device_path_header.sub_type != device_path_temp::MSG_USB_CLASS_DP
                         && device_path_header.sub_type != device_path_temp::MSG_USB_WWID_DP)
                 {
+                    log::info!("USB Bus component: unsupported");
                     return Err(ProtocolError::from(EfiError::Unsupported));
                 }
             }
@@ -315,8 +316,10 @@ impl DriverBinding for UsbBusDriver {
             OpenAttributes::ByDriver { controller },
         ) {
             if status == ProtocolError::AlreadyStarted {
+                log::info!("USB Bus component: Usb2HcProtocol already started");
                 return Ok(());
             } else {
+                log::info!("USB Bus component: Usb2HcProtocol failed to open interface: {:?}", status);
                 return Err(status);
             }
         };
@@ -332,8 +335,10 @@ impl DriverBinding for UsbBusDriver {
             OpenAttributes::ByDriver { controller },
         ) {
             if status == ProtocolError::AlreadyStarted {
+                log::info!("USB Bus component: device_path_temp::Protocol already started");
                 return Ok(());
             } else {
+                log::info!("USB Bus component: device_path_temp::Protocol failed to open interface: {:?}", status);
                 return Err(status);
             }
         };
@@ -341,6 +346,8 @@ impl DriverBinding for UsbBusDriver {
         self.protocols
             .close_interface(controller, device_path_temp::Protocol::PROTOCOL_GUID, agent, Some(controller))
             .ok();
+
+        log::info!("USB Bus component: supported success");
 
         Ok(())
     }
@@ -352,6 +359,7 @@ impl DriverBinding for UsbBusDriver {
         controller: Handle,
         remaining_device_path: Option<DevicePathWalker>,
     ) -> core::result::Result<(), ProtocolError> {
+        log::info!("USB Bus component: driver binding start");
         log::trace!("USB Bus: driver_binding_start on controller {:?}", controller);
 
         let _parent_device_path = self.protocols.open_protocol::<device_path_temp::Protocol>(
