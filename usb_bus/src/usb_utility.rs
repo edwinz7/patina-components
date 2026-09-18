@@ -19,6 +19,7 @@ use patina::{
         tpl::{Tpl, PreviousTpl, TplServices},
     },
     protocol::ProtocolInterface,
+    BinaryGuid,
 };
 use r_efi::{base::Boolean, efi};
 
@@ -45,14 +46,7 @@ pub(crate) struct UsbIoProtocol(pub(crate) efi::protocols::usb_io::Protocol);
 
 // SAFETY: This transparent wrapper binds the standard USB I/O protocol layout to its UEFI GUID.
 unsafe impl ProtocolInterface for UsbIoProtocol {
-    const PROTOCOL_GUID: patina::BinaryGuid = patina::BinaryGuid::from_fields(
-        0x2b2f68d6,
-        0x0cd2,
-        0x44cf,
-        0x8e,
-        0x8b,
-        &[0xbb, 0xa2, 0x0b, 0x1b, 0x5b, 0x75],
-    );
+    const PROTOCOL_GUID: BinaryGuid = BinaryGuid::from_string("2B2F68D6-0CD2-44CF-8E8B-BBA20B1B5B75");
 }
 
 fn host_controller(bus: *mut UsbBus) -> *mut Usb2HcProtocol {

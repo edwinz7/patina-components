@@ -38,6 +38,8 @@ use crate::usb_2_host_controller::{
     USB_PORT_STAT_LOW_SPEED, USB_PORT_STAT_OVERCURRENT, USB_PORT_STAT_SUPER_SPEED,
     Usb2HcTransactionTranslator, UsbPortFeature, UsbPortStatus,
 };
+use crate::device_path_temp::EfiDevicePathProtocol;
+
 use crate::usb_bus_defs::{
     USB_ENUM_POLL_MAXIMUM_ATTEMPTS, USB_MAX_INTERFACE, USB_SET_DEVICE_ADDRESS_STALL,
     USB_WAIT_PORT_STABLE_STALL, UsbDevice, UsbHubServices, UsbInterface, USB_INTERFACE_SIGNATURE,
@@ -189,7 +191,7 @@ pub fn usb_create_interface(device: &mut UsbDevice, descriptor: &mut UsbInterfac
         .as_bytes()
         .as_ptr()
         .cast_mut()
-        .cast::<crate::device_path_temp::Protocol>();
+        .cast::<EfiDevicePathProtocol>();
 
     let mut interface = try_box_new(UsbInterface {
         signature: USB_INTERFACE_SIGNATURE as usize,
@@ -217,7 +219,7 @@ pub fn usb_create_interface(device: &mut UsbDevice, descriptor: &mut UsbInterfac
         .protocols
         .install_interface(
             None,
-            crate::device_path_temp::Protocol::PROTOCOL_GUID,
+            EfiDevicePathProtocol::PROTOCOL_GUID,
             device_path_protocol,
         )
         .ok()?;
@@ -233,7 +235,7 @@ pub fn usb_create_interface(device: &mut UsbDevice, descriptor: &mut UsbInterfac
             .protocols
             .uninstall_interface(
                 handle,
-                crate::device_path_temp::Protocol::PROTOCOL_GUID,
+                EfiDevicePathProtocol::PROTOCOL_GUID,
                 device_path_protocol,
             )
             .is_err()
@@ -262,7 +264,7 @@ pub fn usb_create_interface(device: &mut UsbDevice, descriptor: &mut UsbInterfac
         }
         if services.protocols.uninstall_interface(
             handle,
-            crate::device_path_temp::Protocol::PROTOCOL_GUID,
+            EfiDevicePathProtocol::PROTOCOL_GUID,
             device_path_protocol,
         ).is_err() {
             let _ = Box::into_raw(device_path);
@@ -315,7 +317,7 @@ pub fn usb_free_interface(interface: &mut UsbInterface) -> Status {
 
     if let Err(error) = services.protocols.uninstall_interface(
         handle,
-        crate::device_path_temp::Protocol::PROTOCOL_GUID,
+        EfiDevicePathProtocol::PROTOCOL_GUID,
         device_path,
     ) {
         let _ = services.protocols.install_interface(
@@ -332,7 +334,7 @@ pub fn usb_free_interface(interface: &mut UsbInterface) -> Status {
         return EfiError::from(error).into();
     }
 
-    let Some(device_path) = (unsafe { interface.device_path.cast::<crate::device_path_temp::Protocol>().as_mut() }) else {
+    let Some(device_path) = (unsafe { interface.device_path.cast::<EfiDevicePathProtocol>().as_mut() }) else {
         return Status::INVALID_PARAMETER;
     };
     if let Err(status) = unsafe { usb_free_device_path(device_path) } {

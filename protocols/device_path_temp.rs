@@ -7,7 +7,6 @@
 
 use patina::BinaryGuid;
 use patina::protocol::ProtocolInterface;
-use r_efi::base;
 
 pub type EfiGuid = [u8; 16];
 pub type EfiPhysicalAddress = u64;
@@ -18,15 +17,9 @@ pub type EfiIpAddress = [u8; 16];
 pub type BluetoothAddress = [u8; 6];
 pub type BluetoothLeAddress = [u8; 7];
 
-// Placeholder to get things building. Need to reconcile this with the
-// below implementation at some point
-unsafe impl ProtocolInterface for Protocol {
-    const PROTOCOL_GUID: BinaryGuid =
-        BinaryGuid::from_fields(0x09576e91, 0x6d3f, 0x11d2, 0x8e, 0x39, &[0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b]);
+unsafe impl ProtocolInterface for EfiDevicePathProtocol {
+    const PROTOCOL_GUID: BinaryGuid = BinaryGuid::from_string("09576E91-6D3F-11D2-8E39-00A0C969723B");
 }
-
-pub const PROTOCOL_GUID: base::Guid =
-    base::Guid::from_fields(0x09576e91, 0x6d3f, 0x11d2, 0x8e, 0x39, &[0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b]);
 
 pub const TYPE_HARDWARE: u8 = 0x01;
 pub const TYPE_ACPI: u8 = 0x02;
@@ -40,12 +33,11 @@ pub const END_INSTANCE_DEVICE_PATH_SUBTYPE: u8 = 0x01;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Protocol {
+pub struct EfiDevicePathProtocol {
     pub r#type: u8,
     pub sub_type: u8,
     pub length: [u8; 2],
 }
-pub type EfiDevicePathProtocol = Protocol;
 
 macro_rules! packed_struct {
     ($(#[$meta:meta])* $vis:vis struct $name:ident { $($field:vis $field_name:ident : $field_type:ty),* $(,)? }) => {
@@ -57,54 +49,54 @@ macro_rules! packed_struct {
 }
 
 packed_struct! { pub struct PciDevicePath {
-    header: Protocol, function: u8, device: u8
+    header: EfiDevicePathProtocol, function: u8, device: u8
 } }
 pub const HW_PCI_DP: u8 = 0x01;
 
 packed_struct! { pub struct PccardDevicePath {
-    header: Protocol, function_number: u8
+    header: EfiDevicePathProtocol, function_number: u8
 } }
 pub const HW_PCCARD_DP: u8 = 0x02;
 
 packed_struct! { pub struct MemmapDevicePath {
-    header: Protocol, memory_type: u32,
+    header: EfiDevicePathProtocol, memory_type: u32,
     starting_address: EfiPhysicalAddress, ending_address: EfiPhysicalAddress
 } }
 pub const HW_MEMMAP_DP: u8 = 0x03;
 
 packed_struct! { pub struct VendorDevicePath {
-    header: Protocol, guid: EfiGuid
+    header: EfiDevicePathProtocol, guid: EfiGuid
 } }
 pub const HW_VENDOR_DP: u8 = 0x04;
 pub type VendorDefinedDevicePath = VendorDevicePath;
 
 packed_struct! { pub struct ControllerDevicePath {
-    header: Protocol, controller_number: u32
+    header: EfiDevicePathProtocol, controller_number: u32
 } }
 pub const HW_CONTROLLER_DP: u8 = 0x05;
 
 packed_struct! { pub struct BmcDevicePath {
-    header: Protocol, interface_type: u8, base_address: [u8; 8]
+    header: EfiDevicePathProtocol, interface_type: u8, base_address: [u8; 8]
 } }
 pub const HW_BMC_DP: u8 = 0x06;
 
 packed_struct! { pub struct AcpiHidDevicePath {
-    header: Protocol, hid: u32, uid: u32
+    header: EfiDevicePathProtocol, hid: u32, uid: u32
 } }
 pub const ACPI_DP: u8 = 0x01;
 
 packed_struct! { pub struct AcpiExtendedHidDevicePath {
-    header: Protocol, hid: u32, uid: u32, cid: u32
+    header: EfiDevicePathProtocol, hid: u32, uid: u32, cid: u32
 } }
 pub const ACPI_EXTENDED_DP: u8 = 0x02;
 
 packed_struct! { pub struct AcpiAdrDevicePath {
-    header: Protocol, adr: u32
+    header: EfiDevicePathProtocol, adr: u32
 } }
 pub const ACPI_ADR_DP: u8 = 0x03;
 
 packed_struct! { pub struct AcpiNvdimmDevicePath {
-    header: Protocol, nfit_device_handle: u32
+    header: EfiDevicePathProtocol, nfit_device_handle: u32
 } }
 pub const ACPI_NVDIMM_DP: u8 = 0x04;
 
@@ -149,73 +141,73 @@ pub const fn acpi_display_adr(
 }
 
 packed_struct! { pub struct AtapiDevicePath {
-    header: Protocol, primary_secondary: u8, slave_master: u8, lun: u16
+    header: EfiDevicePathProtocol, primary_secondary: u8, slave_master: u8, lun: u16
 } }
 pub const MSG_ATAPI_DP: u8 = 0x01;
 packed_struct! { pub struct ScsiDevicePath {
-    header: Protocol, pun: u16, lun: u16
+    header: EfiDevicePathProtocol, pun: u16, lun: u16
 } }
 pub const MSG_SCSI_DP: u8 = 0x02;
 packed_struct! { pub struct FibreChannelDevicePath {
-    header: Protocol, reserved: u32, wwn: u64, lun: u64
+    header: EfiDevicePathProtocol, reserved: u32, wwn: u64, lun: u64
 } }
 pub const MSG_FIBRECHANNEL_DP: u8 = 0x03;
 packed_struct! { pub struct FibreChannelExDevicePath {
-    header: Protocol, reserved: u32, wwn: [u8; 8], lun: [u8; 8]
+    header: EfiDevicePathProtocol, reserved: u32, wwn: [u8; 8], lun: [u8; 8]
 } }
 pub const MSG_FIBRECHANNELEX_DP: u8 = 0x15;
 packed_struct! { pub struct F1394DevicePath {
-    header: Protocol, reserved: u32, guid: u64
+    header: EfiDevicePathProtocol, reserved: u32, guid: u64
 } }
 pub const MSG_1394_DP: u8 = 0x04;
 packed_struct! { pub struct UsbDevicePath {
-    header: Protocol, parent_port_number: u8, interface_number: u8
+    header: EfiDevicePathProtocol, parent_port_number: u8, interface_number: u8
 } }
 pub const MSG_USB_DP: u8 = 0x05;
 packed_struct! { pub struct UsbClassDevicePath {
-    header: Protocol, vendor_id: u16, product_id: u16,
+    header: EfiDevicePathProtocol, vendor_id: u16, product_id: u16,
     device_class: u8, device_sub_class: u8, device_protocol: u8
 } }
 pub const MSG_USB_CLASS_DP: u8 = 0x0f;
 packed_struct! { pub struct UsbWwidDevicePath {
-    header: Protocol, interface_number: u16, vendor_id: u16, product_id: u16
+    header: EfiDevicePathProtocol, interface_number: u16, vendor_id: u16, product_id: u16
 } }
 pub const MSG_USB_WWID_DP: u8 = 0x10;
 packed_struct! { pub struct DeviceLogicalUnitDevicePath {
-    header: Protocol, lun: u8
+    header: EfiDevicePathProtocol, lun: u8
 } }
 pub const MSG_DEVICE_LOGICAL_UNIT_DP: u8 = 0x11;
 packed_struct! { pub struct SataDevicePath {
-    header: Protocol, hba_port_number: u16,
+    header: EfiDevicePathProtocol, hba_port_number: u16,
     port_multiplier_port_number: u16, lun: u16
 } }
 pub const MSG_SATA_DP: u8 = 0x12;
 pub const SATA_HBA_DIRECT_CONNECT_FLAG: u16 = 0x8000;
 packed_struct! { pub struct I2oDevicePath {
-    header: Protocol, tid: u32
+    header: EfiDevicePathProtocol, tid: u32
 } }
 pub const MSG_I2O_DP: u8 = 0x06;
 packed_struct! { pub struct MacAddrDevicePath {
-    header: Protocol, mac_address: EfiMacAddress, if_type: u8
+    header: EfiDevicePathProtocol, mac_address: EfiMacAddress, if_type: u8
 } }
 pub const MSG_MAC_ADDR_DP: u8 = 0x0b;
 
 packed_struct! { pub struct Ipv4DevicePath {
-    header: Protocol, local_ip_address: EfiIpv4Address,
+    header: EfiDevicePathProtocol, local_ip_address: EfiIpv4Address,
     remote_ip_address: EfiIpv4Address, local_port: u16, remote_port: u16,
     protocol: u16, static_ip_address: u8, gateway_ip_address: EfiIpv4Address,
     subnet_mask: EfiIpv4Address
 } }
 pub const MSG_IPV4_DP: u8 = 0x0c;
 packed_struct! { pub struct Ipv6DevicePath {
-    header: Protocol, local_ip_address: EfiIpv6Address,
+    header: EfiDevicePathProtocol, local_ip_address: EfiIpv6Address,
     remote_ip_address: EfiIpv6Address, local_port: u16, remote_port: u16,
     protocol: u16, ip_address_origin: u8, prefix_length: u8,
     gateway_ip_address: EfiIpv6Address
 } }
 pub const MSG_IPV6_DP: u8 = 0x0d;
 packed_struct! { pub struct InfiniBandDevicePath {
-    header: Protocol, resource_flags: u32, port_gid: [u8; 16],
+    header: EfiDevicePathProtocol, resource_flags: u32, port_gid: [u8; 16],
     service_id: u64, target_port_id: u64, device_id: u64
 } }
 pub const MSG_INFINIBAND_DP: u8 = 0x09;
@@ -226,61 +218,61 @@ pub const INFINIBAND_RESOURCE_FLAG_STORAGE_PROTOCOL: u32 = 0x08;
 pub const INFINIBAND_RESOURCE_FLAG_NETWORK_PROTOCOL: u32 = 0x10;
 
 packed_struct! { pub struct UartDevicePath {
-    header: Protocol, reserved: u32, baud_rate: u64,
+    header: EfiDevicePathProtocol, reserved: u32, baud_rate: u64,
     data_bits: u8, parity: u8, stop_bits: u8
 } }
 pub const MSG_UART_DP: u8 = 0x0e;
 packed_struct! { pub struct NvdimmNamespaceDevicePath {
-    header: Protocol, uuid: EfiGuid
+    header: EfiDevicePathProtocol, uuid: EfiGuid
 } }
 pub const NVDIMM_NAMESPACE_DP: u8 = 0x20;
 packed_struct! { pub struct UartFlowControlDevicePath {
-    header: Protocol, guid: EfiGuid, flow_control_map: u32
+    header: EfiDevicePathProtocol, guid: EfiGuid, flow_control_map: u32
 } }
 pub const UART_FLOW_CONTROL_HARDWARE: u32 = 0x0000_0001;
 pub const UART_FLOW_CONTROL_XON_XOFF: u32 = 0x0000_0010;
 
 packed_struct! { pub struct SasDevicePath {
-    header: Protocol, guid: EfiGuid, reserved: u32,
+    header: EfiDevicePathProtocol, guid: EfiGuid, reserved: u32,
     sas_address: u64, lun: u64, device_topology: u16, relative_target_port: u16
 } }
 packed_struct! { pub struct SasExDevicePath {
-    header: Protocol, sas_address: [u8; 8], lun: [u8; 8],
+    header: EfiDevicePathProtocol, sas_address: [u8; 8], lun: [u8; 8],
     device_topology: u16, relative_target_port: u16
 } }
 pub const MSG_SASEX_DP: u8 = 0x16;
 packed_struct! { pub struct NvmeNamespaceDevicePath {
-    header: Protocol, namespace_id: u32, namespace_uuid: u64
+    header: EfiDevicePathProtocol, namespace_id: u32, namespace_uuid: u64
 } }
 pub const MSG_NVME_NAMESPACE_DP: u8 = 0x17;
 packed_struct! { pub struct NvmeOfNamespaceDevicePath {
-    header: Protocol, namespace_id_type: u8, namespace_id: [u8; 16]
+    header: EfiDevicePathProtocol, namespace_id_type: u8, namespace_id: [u8; 16]
 } }
 pub const MSG_NVME_OF_NAMESPACE_DP: u8 = 0x22;
 
 packed_struct! { pub struct DnsDevicePath {
-    header: Protocol, is_ipv6: u8
+    header: EfiDevicePathProtocol, is_ipv6: u8
 } }
 pub const MSG_DNS_DP: u8 = 0x1f;
 packed_struct! { pub struct UriDevicePath {
-    header: Protocol
+    header: EfiDevicePathProtocol
 } }
 pub const MSG_URI_DP: u8 = 0x18;
 packed_struct! { pub struct UfsDevicePath {
-    header: Protocol, pun: u8, lun: u8
+    header: EfiDevicePathProtocol, pun: u8, lun: u8
 } }
 pub const MSG_UFS_DP: u8 = 0x19;
 packed_struct! { pub struct SdDevicePath {
-    header: Protocol, slot_number: u8
+    header: EfiDevicePathProtocol, slot_number: u8
 } }
 pub const MSG_SD_DP: u8 = 0x1a;
 packed_struct! { pub struct EmmcDevicePath {
-    header: Protocol, slot_number: u8
+    header: EfiDevicePathProtocol, slot_number: u8
 } }
 pub const MSG_EMMC_DP: u8 = 0x1d;
 
 packed_struct! { pub struct IscsiDevicePath {
-    header: Protocol, network_protocol: u16, login_option: u16,
+    header: EfiDevicePathProtocol, network_protocol: u16, login_option: u16,
     lun: u64, target_portal_group_tag: u16
 } }
 pub const MSG_ISCSI_DP: u8 = 0x13;
@@ -294,24 +286,24 @@ pub const ISCSI_LOGIN_OPTION_CHAP_BI: u16 = 0x0000;
 pub const ISCSI_LOGIN_OPTION_CHAP_UNI: u16 = 0x2000;
 
 packed_struct! { pub struct VlanDevicePath {
-    header: Protocol, vlan_id: u16
+    header: EfiDevicePathProtocol, vlan_id: u16
 } }
 pub const MSG_VLAN_DP: u8 = 0x14;
 packed_struct! { pub struct BluetoothDevicePath {
-    header: Protocol, bd_addr: BluetoothAddress
+    header: EfiDevicePathProtocol, bd_addr: BluetoothAddress
 } }
 pub const MSG_BLUETOOTH_DP: u8 = 0x1b;
 packed_struct! { pub struct WifiDevicePath {
-    header: Protocol, ssid: [u8; 32]
+    header: EfiDevicePathProtocol, ssid: [u8; 32]
 } }
 pub const MSG_WIFI_DP: u8 = 0x1c;
 packed_struct! { pub struct BluetoothLeDevicePath {
-    header: Protocol, address: BluetoothLeAddress
+    header: EfiDevicePathProtocol, address: BluetoothLeAddress
 } }
 pub const MSG_BLUETOOTH_LE_DP: u8 = 0x1e;
 
 packed_struct! { pub struct HardDriveDevicePath {
-    header: Protocol, partition_number: u32, partition_start: u64,
+    header: EfiDevicePathProtocol, partition_number: u32, partition_start: u64,
     partition_size: u64, signature: [u8; 16], mbr_type: u8, signature_type: u8
 } }
 pub const MEDIA_HARDDRIVE_DP: u8 = 0x01;
@@ -321,38 +313,38 @@ pub const NO_DISK_SIGNATURE: u8 = 0x00;
 pub const SIGNATURE_TYPE_MBR: u8 = 0x01;
 pub const SIGNATURE_TYPE_GUID: u8 = 0x02;
 packed_struct! { pub struct CdromDevicePath {
-    header: Protocol, boot_entry: u32, partition_start: u64, partition_size: u64
+    header: EfiDevicePathProtocol, boot_entry: u32, partition_start: u64, partition_size: u64
 } }
 pub const MEDIA_CDROM_DP: u8 = 0x02;
 packed_struct! { pub struct FilepathDevicePath {
-    header: Protocol, path_name: [u16; 1]
+    header: EfiDevicePathProtocol, path_name: [u16; 1]
 } }
 pub const MEDIA_FILEPATH_DP: u8 = 0x04;
 pub const SIZE_OF_FILEPATH_DEVICE_PATH: usize = 4;
 packed_struct! { pub struct MediaProtocolDevicePath {
-    header: Protocol, protocol: EfiGuid
+    header: EfiDevicePathProtocol, protocol: EfiGuid
 } }
 pub const MEDIA_PROTOCOL_DP: u8 = 0x05;
 packed_struct! { pub struct MediaFwVolFilePathDevicePath {
-    header: Protocol, fv_file_name: EfiGuid
+    header: EfiDevicePathProtocol, fv_file_name: EfiGuid
 } }
 pub const MEDIA_PIWG_FW_FILE_DP: u8 = 0x06;
 packed_struct! { pub struct MediaFwVolDevicePath {
-    header: Protocol, fv_name: EfiGuid
+    header: EfiDevicePathProtocol, fv_name: EfiGuid
 } }
 pub const MEDIA_PIWG_FW_VOL_DP: u8 = 0x07;
 packed_struct! { pub struct MediaRelativeOffsetRangeDevicePath {
-    header: Protocol, reserved: u32, starting_offset: u64, ending_offset: u64
+    header: EfiDevicePathProtocol, reserved: u32, starting_offset: u64, ending_offset: u64
 } }
 pub const MEDIA_RELATIVE_OFFSET_RANGE_DP: u8 = 0x08;
 packed_struct! { pub struct MediaRamDiskDevicePath {
-    header: Protocol, starting_addr: [u32; 2], ending_addr: [u32; 2],
+    header: EfiDevicePathProtocol, starting_addr: [u32; 2], ending_addr: [u32; 2],
     type_guid: EfiGuid, instance: u16
 } }
 pub const MEDIA_RAM_DISK_DP: u8 = 0x09;
 
 packed_struct! { pub struct BbsBbsDevicePath {
-    header: Protocol, device_type: u16, status_flag: u16, string: [u8; 1]
+    header: EfiDevicePathProtocol, device_type: u16, status_flag: u16, string: [u8; 1]
 } }
 pub const BBS_BBS_DP: u8 = 0x01;
 pub const BBS_TYPE_FLOPPY: u16 = 0x01;
@@ -374,7 +366,7 @@ pub const MSG_URI_OFFSET: usize = 4;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union EfiDevPath {
-    pub dev_path: Protocol,
+    pub dev_path: EfiDevicePathProtocol,
     pub pci: PciDevicePath,
     pub pccard: PccardDevicePath,
     pub mem_map: MemmapDevicePath,
@@ -428,7 +420,7 @@ pub union EfiDevPath {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union EfiDevPathPtr {
-    pub dev_path: *mut Protocol,
+    pub dev_path: *mut EfiDevicePathProtocol,
     pub pci: *mut PciDevicePath,
     pub pccard: *mut PccardDevicePath,
     pub mem_map: *mut MemmapDevicePath,

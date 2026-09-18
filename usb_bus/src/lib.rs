@@ -10,7 +10,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //!
 #![cfg_attr(not(test), no_std)]
-#![feature(coverage_attribute)]
+#![cfg_attr(coverage, feature(coverage_attribute))]
 
 extern crate alloc;
 
